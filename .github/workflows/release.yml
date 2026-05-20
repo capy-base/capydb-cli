@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+
+    env:
+      RELEASE_REPO_OWNER: ${{ github.repository_owner }}
+      RELEASE_REPO_NAME: ${{ github.event.repository.name }}
+      IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/capydb-cli
+      REPOSITORY_URL: https://github.com/${{ github.repository }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests
+        run: |
+          go mod download
+          go mod verify
+          go test -v ./...
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 4
+          platforms: linux/amd64,linux/arm64
+
+      - name: Verify buildx setup
+        env:
+          BUILDER_NAME: ${{ steps.buildx.outputs.name }}
+        run: |
+          docker buildx ls
+          docker run --privileged --rm tonistiigi/binfmt --install all
+          echo "BUILDER_NAME=${BUILDER_NAME}" >> "$GITHUB_ENV"
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0.24.0
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REPO_OWNER: ${{ env.RELEASE_REPO_OWNER }}
+          RELEASE_REPO_NAME: ${{ env.RELEASE_REPO_NAME }}
+          IMAGE_REPOSITORY: ${{ env.IMAGE_REPOSITORY }}
+          REPOSITORY_URL: ${{ env.REPOSITORY_URL }}
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-artifacts
+          path: dist/*
+          retention-days: 30
+
+  verify:
+    name: Verify Release
+    needs: release
+    runs-on: ubuntu-latest
+
+    env:
+      IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/capydb-cli
+
+    steps:
+      - name: Wait for release propagation
+        run: sleep 30
+
+      - name: Verify GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: gh release view "$TAG" --repo "$REPO"
+
+      - name: Download and test Linux artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p release-test
+          gh release download "$TAG" --repo "$REPO" --pattern 'capydb_*_linux_x86_64.tar.gz' --dir release-test
+          tar -xzf release-test/capydb_*_linux_x86_64.tar.gz -C release-test
+          ./release-test/capydb --version
+
+      - name: Test Docker image
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          docker pull "${IMAGE_REPOSITORY}:${VERSION}"
+          docker run --rm "${IMAGE_REPOSITORY}:${VERSION}" --version

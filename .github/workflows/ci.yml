@@ -1,0 +1,216 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Run tests
+        shell: bash
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        if: matrix.os == 'ubuntu-latest'
+        uses: codecov/codecov-action@v6
+        with:
+          files: ./coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.11.4
+          args: --timeout=5m
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        shell: bash
+        env:
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          VERSION="dev-${GIT_SHA::7}"
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          go build -v -trimpath \
+            -ldflags="-X main.version=${VERSION} -X main.date=${BUILD_DATE} -X main.commit=${GIT_COMMIT} -X main.builtBy=ci" \
+            -o capydb \
+            ./cmd/capydb
+
+      - name: Verify binary
+        run: |
+          ./capydb --version
+          ./capydb --help
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: capydb-linux-amd64
+          path: capydb
+          retention-days: 7
+
+  goreleaser:
+    name: GoReleaser Check
+    runs-on: ubuntu-latest
+
+    env:
+      RELEASE_REPO_OWNER: ${{ github.repository_owner }}
+      RELEASE_REPO_NAME: ${{ github.event.repository.name }}
+      IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/capydb-cli
+      REPOSITORY_URL: https://github.com/${{ github.repository }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0.24.0
+
+      - name: Check config
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: check
+
+      - name: Test snapshot build
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REPO_OWNER: ${{ env.RELEASE_REPO_OWNER }}
+          RELEASE_REPO_NAME: ${{ env.RELEASE_REPO_NAME }}
+          IMAGE_REPOSITORY: ${{ env.IMAGE_REPOSITORY }}
+          REPOSITORY_URL: ${{ env.REPOSITORY_URL }}
+
+      - name: Upload snapshot artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: snapshot-artifacts
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+            dist/*.spdx.json
+          retention-days: 7
+
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: capydb:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_VERSION=test
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            GIT_COMMIT=${{ github.sha }}
+
+      - name: Test Docker image
+        run: |
+          docker run --rm capydb:test --version
+          docker run --rm capydb:test --help

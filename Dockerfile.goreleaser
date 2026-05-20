@@ -1,0 +1,18 @@
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r app && useradd -r -g app app
+
+ARG TARGETPLATFORM
+COPY ${TARGETPLATFORM}/capydb /usr/local/bin/capydb
+RUN chmod +x /usr/local/bin/capydb
+
+USER app
+WORKDIR /workspace
+
+ENTRYPOINT ["/usr/local/bin/capydb"]
+CMD ["--help"]

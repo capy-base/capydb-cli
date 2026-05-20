@@ -1,0 +1,142 @@
+version: 2
+
+project_name: capydb
+
+env:
+  - GO111MODULE=on
+
+before:
+  hooks:
+    - go mod verify
+    - go test ./...
+
+builds:
+  - id: capydb
+    main: ./cmd/capydb
+    binary: capydb
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+      - -X main.builtBy=goreleaser
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- if eq .Os "darwin" }}macOS
+      {{- else }}{{ .Os }}{{ end }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README*
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Documentation
+      regexp: '^.*?docs?(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: Performance and Refactors
+      regexp: '^.*?(perf|refactor)(\([[:word:]]+\))??!?:.+$'
+      order: 3
+    - title: Dependencies
+      regexp: '^.*?(build|deps?)(\([[:word:]]+\))??!?:.+$'
+      order: 4
+    - title: Other Changes
+      order: 999
+  filters:
+    exclude:
+      - "^chore:"
+      - "^style:"
+      - "^test:"
+      - "^ci:"
+      - Merge pull request
+      - Merge branch
+      - go mod tidy
+
+release:
+  github:
+    owner: "{{ .Env.RELEASE_REPO_OWNER }}"
+    name: "{{ .Env.RELEASE_REPO_NAME }}"
+  draft: false
+  prerelease: auto
+  mode: replace
+  header: |
+    ## CapyDB CLI {{ .Tag }}
+
+    Install with:
+
+    ```bash
+    go install github.com/capy-base/capydb/cli/cmd/capydb@{{ .Tag }}
+    ```
+  footer: |
+    Download the archive for your platform from the assets below.
+
+dockers_v2:
+  - ids:
+      - capydb
+    dockerfile: Dockerfile.goreleaser
+    images:
+      - "{{ .Env.IMAGE_REPOSITORY }}"
+    tags:
+      - "{{ .Version }}"
+      - "latest"
+      - "{{ .Version }}-amd64"
+      - "{{ .Version }}-arm64"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    disable: "{{ or .IsSnapshot (eq .Env.IMAGE_REPOSITORY \"\") }}"
+    flags:
+      - "--pull"
+    labels:
+      "org.opencontainers.image.created": "{{ .Date }}"
+      "org.opencontainers.image.title": "{{ .ProjectName }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.source": "{{ .Env.REPOSITORY_URL }}"
+
+sboms:
+  - id: archive
+    artifacts: archive
+    documents:
+      - "${artifact}.spdx.json"
+
+metadata:
+  mod_timestamp: "{{ .CommitTimestamp }}"
