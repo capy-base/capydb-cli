@@ -31,7 +31,7 @@ func (a *app) newPreviewCommand() *cobra.Command {
 		Short: "List preview databases for a project",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			client, _, err := a.resolveClient(ctx, true, a.linkedProjectAPIURL())
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
 			if err != nil {
 				return err
 			}
@@ -46,7 +46,7 @@ func (a *app) newPreviewCommand() *cobra.Command {
 				return fmt.Errorf("list previews: %w", err)
 			}
 			if len(previews) == 0 {
-				fmt.Fprintf(cmd.OutOrStdout(), "No preview databases for project %s\n", project.Name)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No preview databases for project %s\n", project.Name)
 				return nil
 			}
 
@@ -66,7 +66,7 @@ func (a *app) newPreviewCommand() *cobra.Command {
 		Short: "Create a preview database for a project",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			client, _, err := a.resolveClient(ctx, true, a.linkedProjectAPIURL())
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
 			if err != nil {
 				return err
 			}
@@ -85,11 +85,11 @@ func (a *app) newPreviewCommand() *cobra.Command {
 				return fmt.Errorf("create preview: %w", err)
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "Created preview %s (%s) for project %s\n", preview.Preview.Name, preview.Preview.ID, project.Name)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Created preview %s (%s) for project %s\n", preview.Preview.Name, preview.Preview.ID, project.Name)
 			writePreviewTable(cmd.OutOrStdout(), []api.PreviewDetails{preview})
 
 			if createWait && job.ID != "" {
-				fmt.Fprintf(cmd.OutOrStdout(), "Waiting for job %s\n", job.ID)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Waiting for job %s\n", job.ID)
 				job, err = waitForJob(ctx, client, job.ID)
 				if err != nil {
 					return err
@@ -119,7 +119,7 @@ func (a *app) newPreviewCommand() *cobra.Command {
 		Short: "Delete a preview database",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			client, _, err := a.resolveClient(ctx, true, a.linkedProjectAPIURL())
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
 			if err != nil {
 				return err
 			}
@@ -137,7 +137,7 @@ func (a *app) newPreviewCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("delete preview: %w", err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Queued delete for preview %s (%s)\n", preview.Preview.Name, preview.Preview.ID)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued delete for preview %s (%s)\n", preview.Preview.Name, preview.Preview.ID)
 			return maybeWaitForJob(ctx, cmd.OutOrStdout(), client, job, deleteWait, "preview delete")
 		},
 	}
@@ -153,7 +153,7 @@ func (a *app) newPreviewCommand() *cobra.Command {
 		Short: "Reset a preview database",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			client, _, err := a.resolveClient(ctx, true, a.linkedProjectAPIURL())
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
 			if err != nil {
 				return err
 			}
@@ -171,7 +171,7 @@ func (a *app) newPreviewCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("reset preview: %w", err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Queued reset for preview %s (%s)\n", preview.Preview.Name, preview.Preview.ID)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued reset for preview %s (%s)\n", preview.Preview.Name, preview.Preview.ID)
 			return maybeWaitForJob(ctx, cmd.OutOrStdout(), client, job, resetWait, "preview reset")
 		},
 	}
@@ -179,10 +179,43 @@ func (a *app) newPreviewCommand() *cobra.Command {
 	resetCommand.Flags().StringVar(&resetPreviewRef, "preview", "", "Preview id or name")
 	resetCommand.Flags().BoolVar(&resetWait, "wait", false, "Wait for the preview reset job to finish")
 
+	var extendTTLHours int
+	extendCommand := &cobra.Command{
+		Use:   "extend <preview-id>",
+		Short: "Extend the TTL of a preview database",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			previewID := strings.TrimSpace(args[0])
+			if previewID == "" {
+				return fmt.Errorf("preview id is required")
+			}
+			if extendTTLHours < 1 || extendTTLHours > 168 {
+				return fmt.Errorf("--ttl-hours must be between 1 and 168")
+			}
+
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+			if err != nil {
+				return err
+			}
+
+			preview, err := client.ExtendPreviewDatabase(ctx, previewID, extendTTLHours)
+			if err != nil {
+				return fmt.Errorf("extend preview: %w", err)
+			}
+
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Extended preview %s (%s) by %dh\n", preview.Name, preview.ID, extendTTLHours)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "ttl_expires_at: %s\n", formatTime(preview.TTLExpiresAt))
+			return nil
+		},
+	}
+	extendCommand.Flags().IntVar(&extendTTLHours, "ttl-hours", 0, "New TTL in hours (1-168)")
+
 	command.AddCommand(listCommand)
 	command.AddCommand(createCommand)
 	command.AddCommand(deleteCommand)
 	command.AddCommand(resetCommand)
+	command.AddCommand(extendCommand)
 	return command
 }
 
@@ -199,7 +232,7 @@ func (a *app) newBackupsCommand() *cobra.Command {
 		Short: "List backups for a project",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			client, _, err := a.resolveClient(ctx, true, a.linkedProjectAPIURL())
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
 			if err != nil {
 				return err
 			}
@@ -214,7 +247,7 @@ func (a *app) newBackupsCommand() *cobra.Command {
 				return fmt.Errorf("list backups: %w", err)
 			}
 			if len(backups) == 0 {
-				fmt.Fprintf(cmd.OutOrStdout(), "No backups for project %s\n", project.Name)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No backups for project %s\n", project.Name)
 				return nil
 			}
 
@@ -232,7 +265,7 @@ func (a *app) newBackupsCommand() *cobra.Command {
 		Short: "Queue a backup for a project",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			client, _, err := a.resolveClient(ctx, true, a.linkedProjectAPIURL())
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
 			if err != nil {
 				return err
 			}
@@ -246,7 +279,7 @@ func (a *app) newBackupsCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create backup: %w", err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Queued backup job %s for project %s\n", job.ID, project.Name)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued backup job %s for project %s\n", job.ID, project.Name)
 			return maybeWaitForJob(ctx, cmd.OutOrStdout(), client, job, createWait, "backup")
 		},
 	}
@@ -274,7 +307,7 @@ func (a *app) newImportCommand() *cobra.Command {
 				return fmt.Errorf("--source-url is required")
 			}
 
-			client, _, err := a.resolveClient(ctx, true, a.linkedProjectAPIURL())
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
 			if err != nil {
 				return err
 			}
@@ -287,7 +320,7 @@ func (a *app) newImportCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create import: %w", err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Queued import job %s for project %s\n", job.ID, project.Name)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued import job %s for project %s\n", job.ID, project.Name)
 			return maybeWaitForJob(ctx, cmd.OutOrStdout(), client, job, wait, "import")
 		},
 	}
@@ -306,6 +339,7 @@ func (a *app) newRestoreCommand() *cobra.Command {
 	var previewRef string
 	var projectRef string
 	var recreate bool
+	var restorePointID string
 	var restoreTime string
 	var targetKind string
 	var ttlHours int
@@ -318,15 +352,31 @@ func (a *app) newRestoreCommand() *cobra.Command {
 			ctx := cmd.Context()
 			trimmedBackupKey := strings.TrimSpace(backupKey)
 			trimmedRestoreTime := strings.TrimSpace(restoreTime)
-			if (trimmedBackupKey == "") == (trimmedRestoreTime == "") {
-				return fmt.Errorf("exactly one of --backup-key or --restore-time is required")
+			trimmedRestorePoint := strings.TrimSpace(restorePointID)
+			provided := 0
+			if trimmedBackupKey != "" {
+				provided++
+			}
+			if trimmedRestoreTime != "" {
+				provided++
+			}
+			if trimmedRestorePoint != "" {
+				provided++
+			}
+			if provided != 1 {
+				return fmt.Errorf("exactly one of --backup-key, --restore-time, or --restore-point is required")
 			}
 
-			client, _, err := a.resolveClient(ctx, true, a.linkedProjectAPIURL())
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
 			if err != nil {
 				return err
 			}
 			project, err := a.resolveProject(ctx, client, projectRef)
+			if err != nil {
+				return err
+			}
+
+			resolvedKind, err := resolveRestoreTargetKind(targetKind, previewRef, previewName)
 			if err != nil {
 				return err
 			}
@@ -336,11 +386,12 @@ func (a *app) newRestoreCommand() *cobra.Command {
 				ConfirmProjectOverwrite: confirmProjectOverwrite,
 				PreviewName:             strings.TrimSpace(previewName),
 				Recreate:                recreate,
+				RestorePointID:          trimmedRestorePoint,
 				RestoreTime:             trimmedRestoreTime,
-				TargetKind:              strings.TrimSpace(targetKind),
+				TargetKind:              resolvedKind,
 				TTLHours:                ttlHours,
 			}
-			if strings.EqualFold(strings.TrimSpace(targetKind), "preview") {
+			if resolvedKind == "preview" {
 				preview, err := a.resolvePreview(ctx, client, project.ID, previewRef)
 				if err != nil {
 					return err
@@ -348,11 +399,22 @@ func (a *app) newRestoreCommand() *cobra.Command {
 				request.PreviewID = preview.Preview.ID
 			}
 
+			if resolvedKind == "project" {
+				confirmed, err := confirmProjectRestoreOverwrite(cmd, project, confirmProjectOverwrite)
+				if err != nil {
+					return err
+				}
+				if !confirmed {
+					return fmt.Errorf("project overwrite not confirmed; pass --confirm-project-overwrite or confirm interactively")
+				}
+				request.ConfirmProjectOverwrite = true
+			}
+
 			job, err := client.CreateRestore(ctx, project.ID, request)
 			if err != nil {
 				return fmt.Errorf("create restore: %w", err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Queued restore job %s for project %s\n", job.ID, project.Name)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued restore job %s for project %s\n", job.ID, project.Name)
 			return maybeWaitForJob(ctx, cmd.OutOrStdout(), client, job, wait, "restore")
 		},
 	}
@@ -360,7 +422,8 @@ func (a *app) newRestoreCommand() *cobra.Command {
 	command.Flags().StringVar(&projectRef, "project", "", "Project id, slug, or name")
 	command.Flags().StringVar(&backupKey, "backup-key", "", "Backup key to restore")
 	command.Flags().StringVar(&restoreTime, "restore-time", "", "RFC3339 timestamp for point-in-time restore")
-	command.Flags().StringVar(&targetKind, "target-kind", "", "Restore target: project, preview, or new_preview")
+	command.Flags().StringVar(&restorePointID, "restore-point", "", "Labelled restore point id (alternative to --backup-key/--restore-time)")
+	command.Flags().StringVar(&targetKind, "target-kind", "", "Restore target: project, preview, or new_preview (inferred from --preview/--preview-name; defaults to new_preview)")
 	command.Flags().StringVar(&previewRef, "preview", "", "Existing preview id or name when target-kind is preview")
 	command.Flags().StringVar(&previewName, "preview-name", "", "Preview name when target-kind is new_preview")
 	command.Flags().IntVar(&ttlHours, "ttl-hours", 0, "Preview TTL in hours when target-kind is new_preview")
@@ -368,6 +431,198 @@ func (a *app) newRestoreCommand() *cobra.Command {
 	command.Flags().BoolVar(&recreate, "recreate", false, "Recreate the target before restore")
 	command.Flags().BoolVar(&wait, "wait", false, "Wait for the restore job to finish")
 	return command
+}
+
+// resolveRestoreTargetKind validates an explicit --target-kind, or infers a safe
+// default when one is not given. The backend requires target_kind to be one of
+// project|preview|new_preview, so a bare `restore --backup-key X` would otherwise
+// fail with a raw 400. Inference: --preview implies preview, --preview-name implies
+// new_preview, and the safe non-destructive new_preview is used as the fallback.
+func resolveRestoreTargetKind(targetKind, previewRef, previewName string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(targetKind)) {
+	case "project", "preview", "new_preview":
+		return strings.ToLower(strings.TrimSpace(targetKind)), nil
+	case "":
+		switch {
+		case strings.TrimSpace(previewRef) != "":
+			return "preview", nil
+		case strings.TrimSpace(previewName) != "":
+			return "new_preview", nil
+		default:
+			return "new_preview", nil
+		}
+	default:
+		return "", fmt.Errorf("--target-kind must be one of project, preview, or new_preview")
+	}
+}
+
+// confirmProjectRestoreOverwrite guards the destructive project restore path. The
+// --confirm-project-overwrite flag is honoured for non-interactive (CI) usage. On
+// an interactive terminal without the flag, the operator is prompted to retype the
+// project name (or "yes") to confirm before the destructive restore is sent.
+func confirmProjectRestoreOverwrite(cmd *cobra.Command, project api.Project, flagConfirmed bool) (bool, error) {
+	if flagConfirmed {
+		return true, nil
+	}
+	if !stdinIsInteractive() {
+		return false, nil
+	}
+
+	_, _ = fmt.Fprintf(
+		cmd.ErrOrStderr(),
+		"This will OVERWRITE the live database for project %q (%s).\n",
+		project.Name,
+		project.ID,
+	)
+	answer, err := promptLine(fmt.Sprintf("Type the project name %q (or \"yes\") to confirm", project.Name))
+	if err != nil {
+		return false, err
+	}
+	trimmed := strings.TrimSpace(answer)
+	if strings.EqualFold(trimmed, "yes") || trimmed == strings.TrimSpace(project.Name) {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (a *app) newRestorePointsCommand() *cobra.Command {
+	command := &cobra.Command{
+		Use:     "restore-points",
+		Aliases: []string{"restore-point"},
+		Short:   "Manage labelled restore points",
+	}
+
+	var listProjectRef string
+	listCommand := &cobra.Command{
+		Use:   "list",
+		Short: "List restore points for a project",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+			if err != nil {
+				return err
+			}
+			project, err := a.resolveProject(ctx, client, listProjectRef)
+			if err != nil {
+				return err
+			}
+			points, err := client.ListRestorePoints(ctx, project.ID)
+			if err != nil {
+				return fmt.Errorf("list restore points: %w", err)
+			}
+			if len(points) == 0 {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No restore points for project %s\n", project.Name)
+				return nil
+			}
+			writeRestorePointTable(cmd.OutOrStdout(), points)
+			return nil
+		},
+	}
+	listCommand.Flags().StringVar(&listProjectRef, "project", "", "Project id, slug, or name")
+
+	var createProjectRef string
+	var createKind string
+	var createLabel string
+	var createBackupKey string
+	var createPITRTime string
+	var createNote string
+	createCommand := &cobra.Command{
+		Use:   "create",
+		Short: "Create a labelled restore point",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			if strings.TrimSpace(createLabel) == "" {
+				return fmt.Errorf("--label is required")
+			}
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+			if err != nil {
+				return err
+			}
+			project, err := a.resolveProject(ctx, client, createProjectRef)
+			if err != nil {
+				return err
+			}
+			point, err := client.CreateRestorePoint(ctx, project.ID, api.CreateRestorePointRequest{
+				BackupKey: strings.TrimSpace(createBackupKey),
+				Kind:      strings.TrimSpace(createKind),
+				Label:     strings.TrimSpace(createLabel),
+				Note:      strings.TrimSpace(createNote),
+				PITRTime:  strings.TrimSpace(createPITRTime),
+			})
+			if err != nil {
+				return fmt.Errorf("create restore point: %w", err)
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Created restore point %s (%s)\n", point.ID, point.Label)
+			return nil
+		},
+	}
+	createCommand.Flags().StringVar(&createProjectRef, "project", "", "Project id, slug, or name")
+	createCommand.Flags().StringVar(&createLabel, "label", "", "Restore point label (required)")
+	createCommand.Flags().StringVar(&createKind, "kind", "", "Restore point kind: backup or pitr (inferred if omitted)")
+	createCommand.Flags().StringVar(&createBackupKey, "backup-key", "", "Backup key to anchor against (kind=backup)")
+	createCommand.Flags().StringVar(&createPITRTime, "pitr-time", "", "RFC3339 timestamp (kind=pitr; defaults to now)")
+	createCommand.Flags().StringVar(&createNote, "note", "", "Optional note")
+
+	var deleteProjectRef string
+	var deleteRestorePointID string
+	deleteCommand := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete a restore point",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			if strings.TrimSpace(deleteRestorePointID) == "" {
+				return fmt.Errorf("--id is required")
+			}
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+			if err != nil {
+				return err
+			}
+			project, err := a.resolveProject(ctx, client, deleteProjectRef)
+			if err != nil {
+				return err
+			}
+			if err := client.DeleteRestorePoint(ctx, project.ID, strings.TrimSpace(deleteRestorePointID)); err != nil {
+				return fmt.Errorf("delete restore point: %w", err)
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Deleted restore point %s\n", deleteRestorePointID)
+			return nil
+		},
+	}
+	deleteCommand.Flags().StringVar(&deleteProjectRef, "project", "", "Project id, slug, or name")
+	deleteCommand.Flags().StringVar(&deleteRestorePointID, "id", "", "Restore point id")
+
+	command.AddCommand(listCommand)
+	command.AddCommand(createCommand)
+	command.AddCommand(deleteCommand)
+	return command
+}
+
+func writeRestorePointTable(out io.Writer, points []api.RestorePoint) {
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "ID\tLABEL\tKIND\tANCHOR\tSTATE\tCREATED")
+	for _, point := range points {
+		anchor := ""
+		switch point.Kind {
+		case "backup":
+			anchor = point.BackupKey
+			if anchor == "" {
+				anchor = point.BackupID
+			}
+		case "pitr":
+			if point.PITRTime != nil {
+				anchor = point.PITRTime.UTC().Format(time.RFC3339)
+			}
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			point.ID,
+			point.Label,
+			point.Kind,
+			anchor,
+			point.State,
+			point.CreatedAt.UTC().Format(time.RFC3339),
+		)
+	}
+	_ = tw.Flush()
 }
 
 func (a *app) newJobsCommand() *cobra.Command {
@@ -388,7 +643,7 @@ func (a *app) newJobsCommand() *cobra.Command {
 				return fmt.Errorf("--job-id is required")
 			}
 
-			client, _, err := a.resolveClient(ctx, true)
+			client, _, err := a.resolveClient(true)
 			if err != nil {
 				return err
 			}
@@ -398,7 +653,7 @@ func (a *app) newJobsCommand() *cobra.Command {
 				return fmt.Errorf("get job: %w", err)
 			}
 			if wait && !jobDone(job) {
-				fmt.Fprintf(cmd.OutOrStdout(), "Waiting for job %s\n", job.ID)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Waiting for job %s\n", job.ID)
 				job, err = waitForJob(ctx, client, job.ID)
 				if err != nil {
 					return err
@@ -440,7 +695,7 @@ func (a *app) newStudioCommand() *cobra.Command {
 				projectID = linkConfig.ProjectID
 				authConfig.APIURL = a.resolveAPIURL(linkConfig.APIURL)
 			} else {
-				client, resolved, err := a.resolveClient(ctx, true)
+				client, resolved, err := a.resolveClient(true)
 				if err != nil {
 					return err
 				}
@@ -457,7 +712,7 @@ func (a *app) newStudioCommand() *cobra.Command {
 				return err
 			}
 
-			fmt.Fprintln(cmd.OutOrStdout(), rawURL)
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), rawURL)
 			if printOnly {
 				return nil
 			}
@@ -474,7 +729,7 @@ func (a *app) newStudioCommand() *cobra.Command {
 	return command
 }
 
-func (a *app) resolveClient(ctx context.Context, prompt bool, fallbackAPIURL ...string) (*api.Client, resolvedAuth, error) {
+func (a *app) resolveClient(prompt bool, fallbackAPIURL ...string) (*api.Client, resolvedAuth, error) {
 	authConfig, err := a.resolveAuth(prompt, fallbackAPIURL...)
 	if err != nil {
 		return nil, resolvedAuth{}, err
@@ -603,8 +858,8 @@ func (a *app) resolveAppURL(apiURL string) string {
 		return strings.TrimRight(strings.TrimSpace(userConfig.AppURL), "/")
 	}
 	apiURL = strings.TrimRight(strings.TrimSpace(apiURL), "/")
-	if strings.HasSuffix(apiURL, "/api/capydb") {
-		return strings.TrimSuffix(apiURL, "/api/capydb")
+	if trimmed, ok := strings.CutSuffix(apiURL, "/api/capydb"); ok {
+		return trimmed
 	}
 	return apiURL
 }
@@ -632,7 +887,7 @@ func maybeWaitForJob(ctx context.Context, out io.Writer, client *api.Client, job
 		return nil
 	}
 
-	fmt.Fprintf(out, "Waiting for job %s\n", job.ID)
+	_, _ = fmt.Fprintf(out, "Waiting for job %s\n", job.ID)
 	job, err := waitForJob(ctx, client, job.ID)
 	if err != nil {
 		return err
@@ -676,9 +931,9 @@ func jobDone(job api.Job) bool {
 
 func writeBackupTable(out io.Writer, backups []api.Backup) {
 	writer := tabwriter.NewWriter(out, 0, 8, 2, ' ', 0)
-	fmt.Fprintln(writer, "ID\tLABEL\tSTATE\tVERIFY\tSIZE\tCREATED_AT\tBACKUP_KEY")
+	_, _ = fmt.Fprintln(writer, "ID\tLABEL\tSTATE\tVERIFY\tSIZE\tCREATED_AT\tBACKUP_KEY")
 	for _, backup := range backups {
-		fmt.Fprintf(
+		_, _ = fmt.Fprintf(
 			writer,
 			"%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			backup.ID,
@@ -694,22 +949,22 @@ func writeBackupTable(out io.Writer, backups []api.Backup) {
 }
 
 func writeJob(out io.Writer, job api.Job) {
-	fmt.Fprintf(out, "job_id: %s\n", job.ID)
-	fmt.Fprintf(out, "type: %s\n", firstNonEmpty(job.Type, "-"))
-	fmt.Fprintf(out, "state: %s\n", firstNonEmpty(job.State, "-"))
+	_, _ = fmt.Fprintf(out, "job_id: %s\n", job.ID)
+	_, _ = fmt.Fprintf(out, "type: %s\n", firstNonEmpty(job.Type, "-"))
+	_, _ = fmt.Fprintf(out, "state: %s\n", firstNonEmpty(job.State, "-"))
 	if strings.TrimSpace(job.ProjectID) != "" {
-		fmt.Fprintf(out, "project_id: %s\n", job.ProjectID)
+		_, _ = fmt.Fprintf(out, "project_id: %s\n", job.ProjectID)
 	}
 	if strings.TrimSpace(job.Error) != "" {
-		fmt.Fprintf(out, "error: %s\n", job.Error)
+		_, _ = fmt.Fprintf(out, "error: %s\n", job.Error)
 	}
 }
 
 func writePreviewTable(out io.Writer, previews []api.PreviewDetails) {
 	writer := tabwriter.NewWriter(out, 0, 8, 2, ' ', 0)
-	fmt.Fprintln(writer, "ID\tNAME\tMODE\tSTATE\tTTL_EXPIRES_AT\tDIRECT_URL\tPOOLED_URL")
+	_, _ = fmt.Fprintln(writer, "ID\tNAME\tMODE\tSTATE\tTTL_EXPIRES_AT\tDIRECT_URL\tPOOLED_URL")
 	for _, preview := range previews {
-		fmt.Fprintf(
+		_, _ = fmt.Fprintf(
 			writer,
 			"%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			preview.Preview.ID,

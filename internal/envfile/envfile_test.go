@@ -19,7 +19,7 @@ func TestUpsertPreservesCommentsAndUpdatesExistingKeys(t *testing.T) {
 
 	err := Upsert(path, map[string]string{
 		"DATABASE_URL":        "postgres://new",
-		"DATABASE_POOLED_URL": "postgres://pooled",
+		"DATABASE_POOL_URL": "postgres://pooled",
 	})
 	if err != nil {
 		t.Fatalf("upsert env: %v", err)
@@ -37,7 +37,64 @@ func TestUpsertPreservesCommentsAndUpdatesExistingKeys(t *testing.T) {
 	if !strings.Contains(content, "DATABASE_URL=\"postgres://new\"") {
 		t.Fatalf("expected DATABASE_URL to be updated, got:\n%s", content)
 	}
-	if !strings.Contains(content, "DATABASE_POOLED_URL=\"postgres://pooled\"") {
-		t.Fatalf("expected DATABASE_POOLED_URL to be appended, got:\n%s", content)
+	if !strings.Contains(content, "DATABASE_POOL_URL=\"postgres://pooled\"") {
+		t.Fatalf("expected DATABASE_POOL_URL to be appended, got:\n%s", content)
+	}
+}
+
+func TestUpsertWithResolverKeepsExistingValueWhenDeclined(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	if err := os.WriteFile(path, []byte("DATABASE_URL=\"hand-set\"\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	var prompted []string
+	resolver := func(key, existing, incoming string) (bool, error) {
+		prompted = append(prompted, key)
+		if existing != "hand-set" {
+			t.Fatalf("unexpected existing value: %q", existing)
+		}
+		if incoming != "postgres://new" {
+			t.Fatalf("unexpected incoming value: %q", incoming)
+		}
+		return false, nil
+	}
+
+	if err := UpsertWithResolver(path, map[string]string{"DATABASE_URL": "postgres://new"}, resolver); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	if len(prompted) != 1 || prompted[0] != "DATABASE_URL" {
+		t.Fatalf("expected resolver to be invoked for DATABASE_URL, got: %v", prompted)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	if !strings.Contains(string(raw), "DATABASE_URL=\"hand-set\"") {
+		t.Fatalf("expected existing value to be preserved, got:\n%s", string(raw))
+	}
+}
+
+func TestUpsertWithResolverSkippedWhenValueUnchanged(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	if err := os.WriteFile(path, []byte("DATABASE_URL=\"same\"\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	resolver := func(key, existing, incoming string) (bool, error) {
+		t.Fatalf("resolver should not be called when value is unchanged")
+		return false, nil
+	}
+
+	if err := UpsertWithResolver(path, map[string]string{"DATABASE_URL": "same"}, resolver); err != nil {
+		t.Fatalf("upsert: %v", err)
 	}
 }

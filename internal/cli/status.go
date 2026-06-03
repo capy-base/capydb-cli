@@ -30,33 +30,33 @@ func (a *app) runStatus(cmd *cobra.Command, options statusOptions) error {
 	}
 
 	if strings.TrimSpace(userConfig.APIKey) != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "logged_in: yes\n")
-		fmt.Fprintf(cmd.OutOrStdout(), "api_url: %s\n", userConfig.APIURL)
-		fmt.Fprintf(cmd.OutOrStdout(), "app_url: %s\n", userConfig.AppURL)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "logged_in: yes\n")
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_url: %s\n", userConfig.APIURL)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "app_url: %s\n", userConfig.AppURL)
 		if strings.TrimSpace(userConfig.OrganizationID) != "" {
-			fmt.Fprintf(cmd.OutOrStdout(), "organization_id: %s\n", userConfig.OrganizationID)
-			fmt.Fprintf(cmd.OutOrStdout(), "organization_name: %s\n", firstNonEmpty(userConfig.OrganizationName, "-"))
-			fmt.Fprintf(cmd.OutOrStdout(), "organization_slug: %s\n", firstNonEmpty(userConfig.OrganizationSlug, "-"))
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "organization_id: %s\n", userConfig.OrganizationID)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "organization_name: %s\n", firstNonEmpty(userConfig.OrganizationName, "-"))
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "organization_slug: %s\n", firstNonEmpty(userConfig.OrganizationSlug, "-"))
 		}
 	} else {
-		fmt.Fprintf(cmd.OutOrStdout(), "logged_in: no\n")
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "logged_in: no\n")
 	}
 
 	linked := !errors.Is(projectErr, os.ErrNotExist)
 	if !linked {
-		fmt.Fprintf(cmd.OutOrStdout(), "linked_project: no\n")
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "linked_project: no\n")
 	} else {
-		fmt.Fprintf(cmd.OutOrStdout(), "linked_project: yes\n")
-		fmt.Fprintf(cmd.OutOrStdout(), "project_id: %s\n", projectConfig.ProjectID)
-		fmt.Fprintf(cmd.OutOrStdout(), "project_name: %s\n", projectConfig.ProjectName)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "linked_project: yes\n")
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "project_id: %s\n", projectConfig.ProjectID)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "project_name: %s\n", projectConfig.ProjectName)
 		if strings.TrimSpace(projectConfig.ProjectSlug) != "" {
-			fmt.Fprintf(cmd.OutOrStdout(), "project_slug: %s\n", projectConfig.ProjectSlug)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "project_slug: %s\n", projectConfig.ProjectSlug)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "app_path: %s\n", firstNonEmpty(projectConfig.AppPath, "."))
-		fmt.Fprintf(cmd.OutOrStdout(), "profile: %s\n", firstNonEmpty(projectConfig.Profile, projectConfig.Framework))
-		fmt.Fprintf(cmd.OutOrStdout(), "framework: %s\n", firstNonEmpty(projectConfig.Framework, "-"))
-		fmt.Fprintf(cmd.OutOrStdout(), "database_layer: %s\n", firstNonEmpty(projectConfig.DatabaseLayer, "-"))
-		fmt.Fprintf(cmd.OutOrStdout(), "env_file: %s\n", projectConfig.EnvFile)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "app_path: %s\n", firstNonEmpty(projectConfig.AppPath, "."))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "profile: %s\n", firstNonEmpty(projectConfig.Profile, projectConfig.Framework))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "framework: %s\n", firstNonEmpty(projectConfig.Framework, "-"))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "database_layer: %s\n", firstNonEmpty(projectConfig.DatabaseLayer, "-"))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "env_file: %s\n", projectConfig.EnvFile)
 	}
 
 	if !options.remote && strings.TrimSpace(options.projectRef) == "" {
@@ -66,18 +66,18 @@ func (a *app) runStatus(cmd *cobra.Command, options statusOptions) error {
 	apiURL := a.resolveAPIURL(firstNonEmpty(projectConfig.APIURL, userConfig.APIURL))
 	publicStatus, err := api.NewClient(apiURL, "").GetPublicStatus(ctx)
 	if err != nil {
-		fmt.Fprintf(cmd.OutOrStdout(), "api_status: unavailable\n")
-		fmt.Fprintf(cmd.OutOrStdout(), "api_status_error: %s\n", err)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_status: unavailable\n")
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_status_error: %s\n", err)
 	} else {
 		writePublicStatus(cmd, publicStatus)
 	}
 
 	if strings.TrimSpace(options.projectRef) == "" && !linked {
-		fmt.Fprintf(cmd.OutOrStdout(), "remote_project: not_checked\n")
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "remote_project: not_checked\n")
 		return nil
 	}
 
-	client, _, err := a.resolveClient(ctx, false, apiURL)
+	client, _, err := a.resolveClient(false, apiURL)
 	if err != nil {
 		return err
 	}
@@ -87,75 +87,75 @@ func (a *app) runStatus(cmd *cobra.Command, options statusOptions) error {
 		return err
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "remote_project: yes\n")
-	fmt.Fprintf(cmd.OutOrStdout(), "remote_project_id: %s\n", project.ID)
-	fmt.Fprintf(cmd.OutOrStdout(), "remote_project_name: %s\n", project.Name)
-	fmt.Fprintf(cmd.OutOrStdout(), "remote_project_state: %s\n", firstNonEmpty(project.State, "-"))
-	fmt.Fprintf(cmd.OutOrStdout(), "remote_project_environment: %s\n", firstNonEmpty(project.Environment, "-"))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "remote_project: yes\n")
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "remote_project_id: %s\n", project.ID)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "remote_project_name: %s\n", project.Name)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "remote_project_state: %s\n", firstNonEmpty(project.State, "-"))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "remote_project_environment: %s\n", firstNonEmpty(project.Environment, "-"))
 	if strings.TrimSpace(project.LastError) != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "remote_project_error: %s\n", project.LastError)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "remote_project_error: %s\n", project.LastError)
 	}
 
 	if strings.TrimSpace(project.LatestJobID) != "" {
 		job, err := client.GetJob(ctx, project.LatestJobID)
 		if err != nil {
-			fmt.Fprintf(cmd.OutOrStdout(), "latest_job_error: %s\n", err)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_job_error: %s\n", err)
 		} else {
-			fmt.Fprintf(cmd.OutOrStdout(), "latest_job_id: %s\n", job.ID)
-			fmt.Fprintf(cmd.OutOrStdout(), "latest_job_type: %s\n", firstNonEmpty(job.Type, "-"))
-			fmt.Fprintf(cmd.OutOrStdout(), "latest_job_state: %s\n", firstNonEmpty(job.State, "-"))
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_job_id: %s\n", job.ID)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_job_type: %s\n", firstNonEmpty(job.Type, "-"))
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_job_state: %s\n", firstNonEmpty(job.State, "-"))
 		}
 	}
 
 	observability, err := client.GetProjectObservability(ctx, project.ID)
 	if err != nil {
-		fmt.Fprintf(cmd.OutOrStdout(), "observability_error: %s\n", err)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "observability_error: %s\n", err)
 	} else {
 		writeProjectObservability(cmd, observability)
 	}
 
 	backups, err := client.ListBackups(ctx, project.ID)
 	if err != nil {
-		fmt.Fprintf(cmd.OutOrStdout(), "backups_error: %s\n", err)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "backups_error: %s\n", err)
 		return nil
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "backup_count: %d\n", len(backups))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "backup_count: %d\n", len(backups))
 	if latest, ok := latestBackup(backups); ok {
-		fmt.Fprintf(cmd.OutOrStdout(), "latest_backup_id: %s\n", latest.ID)
-		fmt.Fprintf(cmd.OutOrStdout(), "latest_backup_state: %s\n", firstNonEmpty(latest.State, "-"))
-		fmt.Fprintf(cmd.OutOrStdout(), "latest_backup_verify: %s\n", firstNonEmpty(latest.VerificationState, "-"))
-		fmt.Fprintf(cmd.OutOrStdout(), "latest_backup_created_at: %s\n", formatTime(latest.CreatedAt))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_backup_id: %s\n", latest.ID)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_backup_state: %s\n", firstNonEmpty(latest.State, "-"))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_backup_verify: %s\n", firstNonEmpty(latest.VerificationState, "-"))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_backup_created_at: %s\n", formatTime(latest.CreatedAt))
 	}
 	return nil
 }
 
 func writePublicStatus(cmd *cobra.Command, status api.PublicStatusResponse) {
-	fmt.Fprintf(cmd.OutOrStdout(), "api_status: %s\n", firstNonEmpty(status.Status, "-"))
-	fmt.Fprintf(cmd.OutOrStdout(), "api_checked_at: %s\n", formatTime(status.UpdatedAt))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_status: %s\n", firstNonEmpty(status.Status, "-"))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_checked_at: %s\n", formatTime(status.UpdatedAt))
 	for _, component := range status.Components {
 		key := strings.ToLower(strings.NewReplacer(" ", "_", "-", "_").Replace(component.Name))
-		fmt.Fprintf(cmd.OutOrStdout(), "api_component_%s: %s\n", key, firstNonEmpty(component.Status, "-"))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_component_%s: %s\n", key, firstNonEmpty(component.Status, "-"))
 		if strings.TrimSpace(component.Message) != "" {
-			fmt.Fprintf(cmd.OutOrStdout(), "api_component_%s_message: %s\n", key, component.Message)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_component_%s_message: %s\n", key, component.Message)
 		}
 	}
 }
 
 func writeProjectObservability(cmd *cobra.Command, observability api.ProjectObservability) {
-	fmt.Fprintf(
+	_, _ = fmt.Fprintf(
 		cmd.OutOrStdout(),
 		"connections: %d/%d\n",
 		observability.ConnectionCount,
 		observability.ConnectionLimit,
 	)
-	fmt.Fprintf(cmd.OutOrStdout(), "connection_usage: %s\n", formatPercent(observability.ConnectionUsagePercent))
-	fmt.Fprintf(cmd.OutOrStdout(), "database_size: %s\n", formatBytes(observability.DatabaseSizeBytes))
-	fmt.Fprintf(cmd.OutOrStdout(), "storage_limit: %s\n", formatBytes(observability.StorageLimitBytes))
-	fmt.Fprintf(cmd.OutOrStdout(), "storage_usage: %s\n", formatPercent(observability.StorageUsagePercent))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "connection_usage: %s\n", formatPercent(observability.ConnectionUsagePercent))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "database_size: %s\n", formatBytes(observability.DatabaseSizeBytes))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "storage_limit: %s\n", formatBytes(observability.StorageLimitBytes))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "storage_usage: %s\n", formatPercent(observability.StorageUsagePercent))
 	for _, alert := range observability.Alerts {
 		if strings.TrimSpace(alert) != "" {
-			fmt.Fprintf(cmd.OutOrStdout(), "alert: %s\n", alert)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "alert: %s\n", alert)
 		}
 	}
 }

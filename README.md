@@ -7,8 +7,8 @@ The CapyDB CLI is a Go binary for linking local projects to existing CapyDB proj
 From source:
 
 ```bash
-git clone https://github.com/capy-base/capydb-cli
-cd capydb-cli
+git clone https://github.com/capy-base/cli
+cd cli
 make build
 ```
 
@@ -51,6 +51,7 @@ The CLI will:
 - `capydb preview create`
 - `capydb preview reset`
 - `capydb preview delete`
+- `capydb preview extend <preview-id> --ttl-hours N`
 - `capydb backups list`
 - `capydb backups create`
 - `capydb import`
@@ -91,12 +92,13 @@ Saved globally:
 Saved locally:
 
 - `.capydb/project.json` stores the linked project id, chosen env file, detected profile, and other non-secret metadata.
+- The CLI adds both `.capydb/` and the credential-bearing env file (e.g. `.env.local`) to `.gitignore` so the connection URL with the database password is never committed.
 
 Written into the app:
 
 - `DATABASE_URL`
 - `DATABASE_DIRECT_URL`
-- `DATABASE_POOLED_URL`
+- `DATABASE_POOL_URL`
 - framework-specific aliases such as `DIRECT_URL` for Prisma
 
 ## Detected profiles
@@ -128,7 +130,7 @@ For monorepos, the CLI can detect nested app directories and prompt for the app 
 ## Development
 
 ```bash
-cd /capydb-cli
+cd /cli
 make build
 ./capydb-cli --version
 ```

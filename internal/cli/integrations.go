@@ -58,7 +58,7 @@ func (a *app) newIntegrationsCommand() *cobra.Command {
 		Short: "Print environment variable payloads for deployment platforms",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			client, _, err := a.resolveClient(ctx, true, a.linkedProjectAPIURL())
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
 			if err != nil {
 				return err
 			}
@@ -81,7 +81,7 @@ func (a *app) newIntegrationsCommand() *cobra.Command {
 				return fmt.Errorf("--target must be dotenv, json, vercel, or netlify")
 			}
 
-			fmt.Fprintf(cmd.ErrOrStderr(), "project: %s (%s)\n", resolvedProject.Name, resolvedProject.ID)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "project: %s (%s)\n", resolvedProject.Name, resolvedProject.ID)
 			return nil
 		},
 	}
@@ -199,7 +199,7 @@ func sortedEnvKeys(vars map[string]string) []string {
 
 func writeDotenvPayload(cmd *cobra.Command, vars map[string]string) {
 	for _, key := range sortedEnvKeys(vars) {
-		fmt.Fprintf(cmd.OutOrStdout(), "%s=%s\n", key, quoteEnvValue(vars[key]))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s=%s\n", key, quoteEnvValue(vars[key]))
 	}
 }
 

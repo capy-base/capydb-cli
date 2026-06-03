@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -45,8 +47,13 @@ func Execute(version string) error {
 		return err
 	}
 
+	// Cancel the command context on Ctrl-C / SIGTERM so long-running waits
+	// (job polling, browser login) can unwind gracefully instead of hanging.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	application := &app{cwd: workingDirectory}
-	return newRootCommand(application, version).Execute()
+	return newRootCommand(application, version).ExecuteContext(ctx)
 }
 
 func newRootCommand(application *app, version string) *cobra.Command {
@@ -78,6 +85,7 @@ func newRootCommand(application *app, version string) *cobra.Command {
 	root.AddCommand(application.newBackupsCommand())
 	root.AddCommand(application.newImportCommand())
 	root.AddCommand(application.newRestoreCommand())
+	root.AddCommand(application.newRestorePointsCommand())
 	root.AddCommand(application.newJobsCommand())
 	root.AddCommand(application.newStudioCommand())
 	root.AddCommand(application.newIntegrationsCommand())
@@ -181,15 +189,15 @@ func (a *app) runLogin(cmd *cobra.Command, options loginOptions) error {
 	}
 
 	loginURL := strings.TrimRight(appURL, "/") + "/dashboard/cli/login?session=" + url.QueryEscape(session.SessionID)
-	fmt.Fprintf(cmd.OutOrStdout(), "Open this URL to authorize the CLI:\n%s\n", loginURL)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Open this URL to authorize the CLI:\n%s\n", loginURL)
 
 	if !options.noOpen {
 		if err := openURL(loginURL); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Could not open browser automatically: %v\n", err)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Could not open browser automatically: %v\n", err)
 		}
 	}
 
-	fmt.Fprintln(cmd.OutOrStdout(), "Waiting for browser authorization...")
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Waiting for browser authorization...")
 	status, err := waitForCLILoginSession(ctx, anonymousClient, session.SessionID, session.PollToken, session.ExpiresAt)
 	if err != nil {
 		return err
@@ -230,13 +238,13 @@ func (a *app) runLogout(cmd *cobra.Command, args []string) error {
 	}
 	if err := os.Remove(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintln(cmd.OutOrStdout(), "No saved CLI session found.")
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "No saved CLI session found.")
 			return nil
 		}
 		return fmt.Errorf("remove saved auth: %w", err)
 	}
 
-	fmt.Fprintln(cmd.OutOrStdout(), "Cleared saved CLI session.")
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Cleared saved CLI session.")
 	return nil
 }
 
@@ -258,7 +266,7 @@ func (a *app) newWhoamiCommandForAuthGroup() *cobra.Command {
 
 func (a *app) runWhoami(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	client, authConfig, err := a.resolveClient(ctx, false)
+	client, authConfig, err := a.resolveClient(false)
 	if err != nil {
 		return err
 	}
@@ -268,15 +276,15 @@ func (a *app) runWhoami(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load viewer: %w", err)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "api_url: %s\n", authConfig.APIURL)
-	fmt.Fprintf(cmd.OutOrStdout(), "app_url: %s\n", authConfig.AppURL)
-	fmt.Fprintf(cmd.OutOrStdout(), "auth_source: %s\n", firstNonEmpty(viewer.Principal.AuthSource, "api_key"))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_url: %s\n", authConfig.APIURL)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "app_url: %s\n", authConfig.AppURL)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "auth_source: %s\n", firstNonEmpty(viewer.Principal.AuthSource, "api_key"))
 	if viewer.Organization != nil {
-		fmt.Fprintf(cmd.OutOrStdout(), "organization_id: %s\n", viewer.Organization.ID)
-		fmt.Fprintf(cmd.OutOrStdout(), "organization_name: %s\n", viewer.Organization.Name)
-		fmt.Fprintf(cmd.OutOrStdout(), "organization_slug: %s\n", viewer.Organization.Slug)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "organization_id: %s\n", viewer.Organization.ID)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "organization_name: %s\n", viewer.Organization.Name)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "organization_slug: %s\n", viewer.Organization.Slug)
 	} else {
-		fmt.Fprintf(cmd.OutOrStdout(), "organization_id: -\n")
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "organization_id: -\n")
 	}
 	return nil
 }
@@ -349,14 +357,14 @@ func (a *app) newCreateCommand() *cobra.Command {
 				Slug:      strings.TrimSpace(slug),
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "Creating project %s on cluster %s (%s)\n", request.Name, cluster.Name, cluster.Region)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Creating project %s on cluster %s (%s)\n", request.Name, cluster.Name, cluster.Region)
 			createdProject, job, err := client.CreateProject(ctx, request)
 			if err != nil {
 				return fmt.Errorf("create project: %w", err)
 			}
 
 			if job.ID != "" {
-				fmt.Fprintf(cmd.OutOrStdout(), "Waiting for provision job %s\n", job.ID)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Waiting for provision job %s\n", job.ID)
 				if job, err = waitForJob(ctx, client, job.ID); err != nil {
 					return err
 				}
@@ -378,7 +386,7 @@ func (a *app) newCreateCommand() *cobra.Command {
 				ProjectSlug:   createdProject.Slug,
 			}
 
-			if err := a.writeProjectEnv(ctx, client, createdProject.ID, linkConfig, envFileOverride); err != nil {
+			if err := a.writeProjectEnv(cmd, client, createdProject.ID, linkConfig, envFileOverride, true); err != nil {
 				return err
 			}
 
@@ -435,7 +443,7 @@ func (a *app) newLinkCommand() *cobra.Command {
 				ProjectSlug:   resolvedProject.Slug,
 			}
 
-			if err := a.writeProjectEnv(ctx, client, resolvedProject.ID, linkConfig, envFileOverride); err != nil {
+			if err := a.writeProjectEnv(cmd, client, resolvedProject.ID, linkConfig, envFileOverride, true); err != nil {
 				return err
 			}
 			if err := a.persistResolvedAuth(authConfig); err != nil {
@@ -460,13 +468,13 @@ func (a *app) newUnlinkCommand() *cobra.Command {
 			path := config.ProjectConfigPath(a.cwd)
 			if err := os.Remove(path); err != nil {
 				if errors.Is(err, os.ErrNotExist) {
-					fmt.Fprintln(cmd.OutOrStdout(), "No local project link found.")
+					_, _ = fmt.Fprintln(cmd.OutOrStdout(), "No local project link found.")
 					return nil
 				}
 				return fmt.Errorf("remove local project link: %w", err)
 			}
 
-			fmt.Fprintln(cmd.OutOrStdout(), "Removed local project link.")
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Removed local project link.")
 			return nil
 		},
 	}
@@ -484,8 +492,6 @@ func (a *app) newEnvCommand() *cobra.Command {
 		Use:   "pull",
 		Short: "Refresh local env vars from the linked CapyDB project",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-
 			linkConfig, err := config.LoadProjectConfig(a.cwd)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
@@ -500,16 +506,16 @@ func (a *app) newEnvCommand() *cobra.Command {
 			}
 
 			client := api.NewClient(authConfig.APIURL, authConfig.APIKey)
-			if err := a.writeProjectEnv(ctx, client, linkConfig.ProjectID, linkConfig, envFileOverride); err != nil {
+			if err := a.writeProjectEnv(cmd, client, linkConfig.ProjectID, linkConfig, envFileOverride, false); err != nil {
 				return err
 			}
 			if err := a.persistResolvedAuth(authConfig); err != nil {
 				return err
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "Updated %s from project %s\n", firstNonEmpty(envFileOverride, linkConfig.EnvFile), linkConfig.ProjectID)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Updated %s from project %s\n", firstNonEmpty(envFileOverride, linkConfig.EnvFile), linkConfig.ProjectID)
 			for _, step := range project.BuildNextSteps(projectDetectionFromConfig(linkConfig)) {
-				fmt.Fprintf(cmd.OutOrStdout(), "- %s\n", step)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "- %s\n", step)
 			}
 			return nil
 		},
@@ -622,15 +628,16 @@ func (a *app) saveAuthAndPrint(cmd *cobra.Command, authConfig resolvedAuth) erro
 		return err
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Saved CLI auth to %s\n", path)
-	fmt.Fprintf(cmd.OutOrStdout(), "API URL: %s\n", authConfig.APIURL)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Saved CLI auth to %s\n", path)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "API URL: %s\n", authConfig.APIURL)
 	if strings.TrimSpace(authConfig.OrganizationName) != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "Organization: %s (%s)\n", authConfig.OrganizationName, firstNonEmpty(authConfig.OrganizationSlug, authConfig.OrganizationID))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Organization: %s (%s)\n", authConfig.OrganizationName, firstNonEmpty(authConfig.OrganizationSlug, authConfig.OrganizationID))
 	}
 	return nil
 }
 
-func (a *app) writeProjectEnv(ctx context.Context, client *api.Client, projectID string, linkConfig config.ProjectConfig, envFileOverride string) error {
+func (a *app) writeProjectEnv(cmd *cobra.Command, client *api.Client, projectID string, linkConfig config.ProjectConfig, envFileOverride string, confirmOverwrite bool) error {
+	ctx := cmd.Context()
 	projectDetails, _, err := client.GetProject(ctx, projectID)
 	if err != nil {
 		return fmt.Errorf("fetch project: %w", err)
@@ -647,7 +654,13 @@ func (a *app) writeProjectEnv(ctx context.Context, client *api.Client, projectID
 
 	detection := projectDetectionFromConfig(linkConfig)
 	plan := project.BuildEnvPlan(detection, connections.DirectURL, connections.PooledURL)
-	if err := envfile.Upsert(envTargetPath(a.cwd, linkConfig.AppPath, envPath), plan.Vars); err != nil {
+	envAbsPath := envTargetPath(a.cwd, linkConfig.AppPath, envPath)
+
+	var resolver envfile.ConflictResolver
+	if confirmOverwrite {
+		resolver = a.envOverwriteResolver(cmd)
+	}
+	if err := envfile.UpsertWithResolver(envAbsPath, plan.Vars, resolver); err != nil {
 		return err
 	}
 
@@ -664,10 +677,58 @@ func (a *app) writeProjectEnv(ctx context.Context, client *api.Client, projectID
 	if err := config.SaveProjectConfig(a.cwd, linkConfig); err != nil {
 		return err
 	}
-	if err := gitignore.EnsureLocalConfigIgnored(a.cwd); err != nil {
+
+	// Ensure both the local link directory and the credential-bearing env file
+	// are git-ignored. The env file holds the full postgres:// URL with the
+	// password, so it must never be committed.
+	envIgnore := envIgnoreEntry(linkConfig.AppPath, envPath)
+	if err := gitignore.EnsureLocalConfigIgnored(a.cwd, envIgnore); err != nil {
 		return err
 	}
 	return nil
+}
+
+// envIgnoreEntry resolves the .gitignore entry for the env file the CLI writes,
+// relative to the repo root (cwd). Absolute or directory-qualified env paths are
+// passed through; bare filenames are joined with the detected app path.
+func envIgnoreEntry(appPath, envPath string) string {
+	envPath = strings.TrimSpace(envPath)
+	if envPath == "" {
+		return ""
+	}
+	if filepath.IsAbs(envPath) || strings.Contains(envPath, string(filepath.Separator)) {
+		return envPath
+	}
+	if trimmed := strings.TrimSpace(appPath); trimmed != "" {
+		return filepath.Join(trimmed, envPath)
+	}
+	return envPath
+}
+
+// envOverwriteResolver returns a ConflictResolver that warns about an existing,
+// differing env value and asks for confirmation on an interactive terminal. In
+// non-interactive (CI) contexts it prints a clear warning and proceeds with the
+// overwrite so automated link/create flows keep working.
+func (a *app) envOverwriteResolver(cmd *cobra.Command) envfile.ConflictResolver {
+	return func(key, existing, incoming string) (bool, error) {
+		if !stdinIsInteractive() {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: overwriting existing %s in env file\n", key)
+			return true, nil
+		}
+
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s already has a value in the env file that differs from the CapyDB value.\n", key)
+		answer, err := promptLine(fmt.Sprintf("Overwrite %s? [y/N]", key))
+		if err != nil {
+			return false, err
+		}
+		switch strings.ToLower(strings.TrimSpace(answer)) {
+		case "y", "yes":
+			return true, nil
+		default:
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Keeping existing %s.\n", key)
+			return false, nil
+		}
+	}
 }
 
 func resolveCLILoginDeviceName(value string) string {
@@ -803,12 +864,12 @@ func projectDetectionFromConfig(cfg config.ProjectConfig) project.Detection {
 }
 
 func printLinkSummary(cmd *cobra.Command, detection project.Detection, linkConfig config.ProjectConfig) {
-	fmt.Fprintf(cmd.OutOrStdout(), "Linked %s to project %s\n", firstNonEmpty(detection.ProjectName, filepath.Base(linkConfig.AppPath), filepath.Base(linkConfig.ProjectName)), linkConfig.ProjectID)
-	fmt.Fprintf(cmd.OutOrStdout(), "App path: %s\n", firstNonEmpty(detection.AppPath, "."))
-	fmt.Fprintf(cmd.OutOrStdout(), "Env file updated: %s\n", firstNonEmpty(filepath.Join(detection.AppPath, detection.EnvFile), detection.EnvFile))
-	fmt.Fprintf(cmd.OutOrStdout(), "Profile: %s\n", firstNonEmpty(detection.Profile, detection.Framework))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Linked %s to project %s\n", firstNonEmpty(detection.ProjectName, filepath.Base(linkConfig.AppPath), filepath.Base(linkConfig.ProjectName)), linkConfig.ProjectID)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "App path: %s\n", firstNonEmpty(detection.AppPath, "."))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Env file updated: %s\n", firstNonEmpty(filepath.Join(detection.AppPath, detection.EnvFile), detection.EnvFile))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Profile: %s\n", firstNonEmpty(detection.Profile, detection.Framework))
 	for _, step := range project.BuildNextSteps(detection) {
-		fmt.Fprintf(cmd.OutOrStdout(), "- %s\n", step)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "- %s\n", step)
 	}
 }
 

@@ -112,7 +112,7 @@ func TestCreateCommandWritesEnvAndProjectConfig(t *testing.T) {
 	for _, expected := range []string{
 		`DATABASE_URL="postgresql://direct-user:secret@capydb.dev:6432/test_app?sslmode=require"`,
 		`DATABASE_DIRECT_URL="postgresql://direct-user:secret@capydb.dev:5432/test_app?sslmode=require"`,
-		`DATABASE_POOLED_URL="postgresql://direct-user:secret@capydb.dev:6432/test_app?sslmode=require"`,
+		`DATABASE_POOL_URL="postgresql://direct-user:secret@capydb.dev:6432/test_app?sslmode=require"`,
 	} {
 		if !strings.Contains(envText, expected) {
 			t.Fatalf("env file missing %q\n%s", expected, envText)
@@ -136,6 +136,9 @@ func TestCreateCommandWritesEnvAndProjectConfig(t *testing.T) {
 	}
 	if !strings.Contains(string(gitignoreData), ".capydb/") {
 		t.Fatalf(".gitignore does not ignore .capydb:\n%s", string(gitignoreData))
+	}
+	if !strings.Contains(string(gitignoreData), ".env.local") {
+		t.Fatalf(".gitignore does not ignore the credential-bearing env file:\n%s", string(gitignoreData))
 	}
 }
 
@@ -681,6 +684,14 @@ func TestLinkCommandDetectsNestedAppAndResolvesProjectByName(t *testing.T) {
 	}
 	if projectConfig.ProjectSlug != "web-app" {
 		t.Fatalf("unexpected project slug: %s", projectConfig.ProjectSlug)
+	}
+
+	gitignoreData, err := os.ReadFile(filepath.Join(tempDir, ".gitignore"))
+	if err != nil {
+		t.Fatalf("read .gitignore: %v", err)
+	}
+	if !strings.Contains(string(gitignoreData), filepath.Join("apps", "web", ".env.local")) {
+		t.Fatalf(".gitignore does not ignore the nested app env file:\n%s", string(gitignoreData))
 	}
 }
 

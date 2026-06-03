@@ -160,7 +160,7 @@ func BuildEnvPlan(detection Detection, directURL, pooledURL string) EnvPlan {
 	plan := EnvPlan{
 		DatabaseURLVar: "DATABASE_URL",
 		DirectURLVar:   "DATABASE_DIRECT_URL",
-		PooledURLVar:   "DATABASE_POOLED_URL",
+		PooledURLVar:   "DATABASE_POOL_URL",
 		Vars:           make(map[string]string),
 	}
 
@@ -173,7 +173,7 @@ func BuildEnvPlan(detection Detection, directURL, pooledURL string) EnvPlan {
 			plan.Vars["DATABASE_DIRECT_URL"] = directURL
 		}
 		if pooledURL != "" {
-			plan.Vars["DATABASE_POOLED_URL"] = pooledURL
+			plan.Vars["DATABASE_POOL_URL"] = pooledURL
 		}
 	case DatabaseLayerDrizzle, DatabaseLayerPG:
 		plan.Vars["DATABASE_URL"] = firstNonEmpty(pooledURL, directURL)
@@ -181,7 +181,7 @@ func BuildEnvPlan(detection Detection, directURL, pooledURL string) EnvPlan {
 			plan.Vars["DATABASE_DIRECT_URL"] = directURL
 		}
 		if pooledURL != "" {
-			plan.Vars["DATABASE_POOLED_URL"] = pooledURL
+			plan.Vars["DATABASE_POOL_URL"] = pooledURL
 		}
 	case DatabaseLayerPGX, DatabaseLayerSQLAlchemy, DatabaseLayerActiveRecord:
 		plan.Vars["DATABASE_URL"] = firstNonEmpty(directURL, pooledURL)
@@ -189,7 +189,7 @@ func BuildEnvPlan(detection Detection, directURL, pooledURL string) EnvPlan {
 			plan.Vars["DATABASE_DIRECT_URL"] = directURL
 		}
 		if pooledURL != "" {
-			plan.Vars["DATABASE_POOLED_URL"] = pooledURL
+			plan.Vars["DATABASE_POOL_URL"] = pooledURL
 		}
 	default:
 		switch detection.Framework {
@@ -202,7 +202,7 @@ func BuildEnvPlan(detection Detection, directURL, pooledURL string) EnvPlan {
 			plan.Vars["DATABASE_DIRECT_URL"] = directURL
 		}
 		if pooledURL != "" {
-			plan.Vars["DATABASE_POOLED_URL"] = pooledURL
+			plan.Vars["DATABASE_POOL_URL"] = pooledURL
 		}
 	}
 

@@ -113,9 +113,35 @@ type CreateRestoreRequest struct {
 	PreviewID               string `json:"preview_id,omitempty"`
 	PreviewName             string `json:"preview_name,omitempty"`
 	Recreate                bool   `json:"recreate,omitempty"`
+	RestorePointID          string `json:"restore_point_id,omitempty"`
 	RestoreTime             string `json:"restore_time,omitempty"`
 	TargetKind              string `json:"target_kind,omitempty"`
 	TTLHours                int    `json:"ttl_hours,omitempty"`
+}
+
+type RestorePoint struct {
+	BackupID           string     `json:"backup_id,omitempty"`
+	BackupKey          string     `json:"backup_key,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	CreatedByActorID   string     `json:"created_by_actor_id,omitempty"`
+	CreatedByActorKind string     `json:"created_by_actor_kind"`
+	ID                 string     `json:"id"`
+	Kind               string     `json:"kind"`
+	Label              string     `json:"label"`
+	Note               string     `json:"note,omitempty"`
+	OrganizationID     string     `json:"organization_id"`
+	PITRTime           *time.Time `json:"pitr_time,omitempty"`
+	ProjectID          string     `json:"project_id"`
+	State              string     `json:"state"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+type CreateRestorePointRequest struct {
+	BackupKey string `json:"backup_key,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	Label     string `json:"label"`
+	Note      string `json:"note,omitempty"`
+	PITRTime  string `json:"pitr_time,omitempty"`
 }
 
 type Job struct {
@@ -446,6 +472,18 @@ func (c *Client) ListProjects(ctx context.Context, organizationID string) ([]Pro
 	return response.Projects, nil
 }
 
+func (c *Client) ExtendPreviewDatabase(ctx context.Context, previewID string, ttlHours int) (Preview, error) {
+	var response struct {
+		Preview Preview `json:"preview"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/preview-databases/"+previewID+"/extend", map[string]int{
+		"ttl_hours": ttlHours,
+	}, &response); err != nil {
+		return Preview{}, err
+	}
+	return response.Preview, nil
+}
+
 func (c *Client) ResetPreviewDatabase(ctx context.Context, previewID string) (Job, error) {
 	var response struct {
 		Job Job `json:"job"`
@@ -454,6 +492,30 @@ func (c *Client) ResetPreviewDatabase(ctx context.Context, previewID string) (Jo
 		return Job{}, err
 	}
 	return response.Job, nil
+}
+
+func (c *Client) ListRestorePoints(ctx context.Context, projectID string) ([]RestorePoint, error) {
+	var response struct {
+		RestorePoints []RestorePoint `json:"restore_points"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/projects/"+projectID+"/restore-points", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.RestorePoints, nil
+}
+
+func (c *Client) CreateRestorePoint(ctx context.Context, projectID string, request CreateRestorePointRequest) (RestorePoint, error) {
+	var response struct {
+		RestorePoint RestorePoint `json:"restore_point"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/restore-points", request, &response); err != nil {
+		return RestorePoint{}, err
+	}
+	return response.RestorePoint, nil
+}
+
+func (c *Client) DeleteRestorePoint(ctx context.Context, projectID, restorePointID string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/projects/"+projectID+"/restore-points/"+restorePointID, nil, nil)
 }
 
 func (c *Client) do(ctx context.Context, method, path string, payload any, dest any) error {
@@ -482,7 +544,7 @@ func (c *Client) do(ctx context.Context, method, path string, payload any, dest 
 	if err != nil {
 		return fmt.Errorf("perform request: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	raw, err := io.ReadAll(response.Body)
 	if err != nil {
