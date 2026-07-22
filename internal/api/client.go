@@ -1,65 +1,36 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/capy-base/capydbclient"
 )
 
-type APIError struct {
-	Message    string
-	StatusCode int
-}
-
-func (e *APIError) Error() string {
-	if e.Message == "" {
-		return fmt.Sprintf("api request failed with status %d", e.StatusCode)
-	}
-	return fmt.Sprintf("api request failed with status %d: %s", e.StatusCode, e.Message)
-}
+// APIError is a non-2xx control-plane response. It is the shared transport
+// error type; callers match it with errors.As/AsType as before.
+type APIError = capydbclient.APIError
 
 type Client struct {
-	apiKey     string
-	baseURL    string
-	httpClient *http.Client
+	doer *capydbclient.Doer
 }
 
-type Cluster struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Provider   string `json:"provider"`
-	Region     string `json:"region"`
-	PublicHost string `json:"public_host"`
-	DirectPort int    `json:"direct_port"`
-	PooledPort int    `json:"pooled_port"`
-	State      string `json:"state"`
-}
+// CreateProjectRequest, and the other shared control-plane entities/request
+// bodies below, come from the shared capydbclient module (single source of truth
+// mirrored from the OpenAPI spec) rather than being re-declared here.
+type CreateProjectRequest = capydbclient.CreateProjectRequest
 
-type CreateProjectRequest struct {
-	ClusterID string `json:"cluster_id"`
-	Name      string `json:"name"`
-	Region    string `json:"region,omitempty"`
-	Slug      string `json:"slug,omitempty"`
-}
+type Organization = capydbclient.Organization
 
-type Organization struct {
-	BillingPeriodEnd *time.Time `json:"billing_period_end,omitempty"`
-	BillingPlan      string     `json:"billing_plan"`
-	BillingStatus    string     `json:"billing_status"`
-	ID               string     `json:"id"`
-	Name             string     `json:"name"`
-	Slug             string     `json:"slug"`
-}
-
-type Viewer struct {
-	Organization *Organization `json:"organization"`
-}
+type Viewer = capydbclient.Viewer
 
 type ViewerPrincipal struct {
 	AuthSource            string   `json:"auth_source"`
@@ -88,6 +59,12 @@ type CLILoginSessionStartRequest struct {
 	DeviceName string     `json:"device_name,omitempty"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 	Name       string     `json:"name,omitempty"`
+	// Scopes narrows the minted key to a subset of the device-login scope set;
+	// it can never widen it. Empty requests the full set.
+	Scopes []string `json:"scopes,omitempty"`
+	// Source labels who drives the login ("cli" or "agent"); it is shown on
+	// the consent screen and the dashboard key list.
+	Source string `json:"source,omitempty"`
 }
 
 type CLILoginSessionStatus struct {
@@ -101,13 +78,10 @@ type CLILoginSessionStatus struct {
 	State            string     `json:"state"`
 }
 
-type CreatePreviewRequest struct {
-	Mode     string `json:"mode,omitempty"`
-	Name     string `json:"name,omitempty"`
-	TTLHours int    `json:"ttl_hours,omitempty"`
-}
+type CreatePreviewRequest = capydbclient.CreatePreviewRequest
 
 type CreateRestoreRequest struct {
+	AllowUnverifiedBackup   bool   `json:"allow_unverified_backup,omitempty"`
 	BackupKey               string `json:"backup_key,omitempty"`
 	ConfirmProjectOverwrite bool   `json:"confirm_project_overwrite,omitempty"`
 	PreviewID               string `json:"preview_id,omitempty"`
@@ -144,33 +118,29 @@ type CreateRestorePointRequest struct {
 	PITRTime  string `json:"pitr_time,omitempty"`
 }
 
-type Job struct {
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	State     string `json:"state"`
-	Error     string `json:"error,omitempty"`
-	ProjectID string `json:"project_id,omitempty"`
-}
+type Job = capydbclient.Job
 
-type Project struct {
-	ID             string `json:"id"`
-	OrganizationID string `json:"organization_id"`
-	ClusterID      string `json:"cluster_id"`
-	Environment    string `json:"environment,omitempty"`
-	Plan           string `json:"plan,omitempty"`
-	Name           string `json:"name"`
-	Slug           string `json:"slug"`
-	Region         string `json:"region,omitempty"`
-	State          string `json:"state"`
-	LastError      string `json:"last_error,omitempty"`
-	LatestJobID    string `json:"latest_job_id,omitempty"`
-}
+type Project = capydbclient.Project
 
-type ConnectionInfo struct {
-	DirectURL string `json:"direct_url,omitempty"`
-	PooledURL string `json:"pooled_url,omitempty"`
-	Username  string `json:"username"`
-}
+type DatabaseSchema = capydbclient.DatabaseSchema
+
+type SchemaNamespace = capydbclient.SchemaNamespace
+
+type SchemaTable = capydbclient.SchemaTable
+
+type SchemaColumn = capydbclient.SchemaColumn
+
+type SchemaEnum = capydbclient.SchemaEnum
+
+type SchemaExtension = capydbclient.SchemaExtension
+
+type SchemaForeignKey = capydbclient.SchemaForeignKey
+
+type SchemaUniqueConstraint = capydbclient.SchemaUniqueConstraint
+
+type GeneratedTypes = capydbclient.GeneratedTypes
+
+type ConnectionInfo = capydbclient.ConnectionInfo
 
 type ProjectConnectionInfo = ConnectionInfo
 
@@ -212,6 +182,31 @@ type Backup struct {
 	VerificationState string    `json:"verification_state"`
 }
 
+// ScheduledBackup is the project's recurring daily backup configuration.
+type ScheduledBackup struct {
+	CreatedAt     time.Time  `json:"created_at"`
+	CronHour      int        `json:"cron_hour"`
+	CronMinute    int        `json:"cron_minute"`
+	ID            string     `json:"id"`
+	IsActive      bool       `json:"is_active"`
+	Label         string     `json:"label,omitempty"`
+	LastJobID     string     `json:"last_job_id,omitempty"`
+	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
+	ProjectID     string     `json:"project_id"`
+	RetentionDays int        `json:"retention_days"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+// UpsertScheduledBackupRequest configures the project's single default
+// schedule. RetentionDays of 0 lets the server apply its default.
+type UpsertScheduledBackupRequest struct {
+	CronHour      int    `json:"cron_hour"`
+	CronMinute    int    `json:"cron_minute"`
+	IsActive      bool   `json:"is_active"`
+	Label         string `json:"label,omitempty"`
+	RetentionDays int    `json:"retention_days,omitempty"`
+}
+
 type PublicStatusComponent struct {
 	Message string `json:"message,omitempty"`
 	Name    string `json:"name"`
@@ -225,24 +220,208 @@ type PublicStatusResponse struct {
 	UpdatedAt  time.Time               `json:"updated_at"`
 }
 
-type ProjectObservability struct {
-	Alerts                 []string `json:"alerts"`
-	ConnectionCount        int      `json:"connection_count"`
-	ConnectionLimit        int      `json:"connection_limit"`
-	ConnectionUsagePercent float64  `json:"connection_usage_percent"`
-	DatabaseSizeBytes      int64    `json:"database_size_bytes"`
-	StorageLimitBytes      int64    `json:"storage_limit_bytes"`
-	StorageUsagePercent    float64  `json:"storage_usage_percent"`
+type ActiveQuery struct {
+	PID           int     `json:"pid"`
+	Username      string  `json:"username"`
+	State         string  `json:"state"`
+	DurationMs    float64 `json:"duration_ms"`
+	Query         string  `json:"query"`
+	WaitEvent     string  `json:"wait_event,omitempty"`
+	WaitEventType string  `json:"wait_event_type,omitempty"`
 }
 
-func NewClient(baseURL, apiKey string) *Client {
-	return &Client{
-		apiKey:  strings.TrimSpace(apiKey),
-		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+type SlowQuery struct {
+	Calls       int64   `json:"calls"`
+	Rows        int64   `json:"rows"`
+	TotalTimeMs float64 `json:"total_time_ms"`
+	MeanTimeMs  float64 `json:"mean_time_ms"`
+	Query       string  `json:"query"`
+}
+
+type ProjectObservability struct {
+	ActiveQueries          []ActiveQuery `json:"active_queries"`
+	Alerts                 []string      `json:"alerts"`
+	ConnectionCount        int           `json:"connection_count"`
+	ConnectionLimit        int           `json:"connection_limit"`
+	ConnectionUsagePercent float64       `json:"connection_usage_percent"`
+	DatabaseSizeBytes      int64         `json:"database_size_bytes"`
+	PgStatStatements       bool          `json:"pg_stat_statements"`
+	SlowQueries            []SlowQuery   `json:"slow_queries"`
+	StorageLimitBytes      int64         `json:"storage_limit_bytes"`
+	StorageUsagePercent    float64       `json:"storage_usage_percent"`
+}
+
+type SQLResult struct {
+	Columns    []string         `json:"columns"`
+	Rows       []map[string]any `json:"rows"`
+	RowCount   int              `json:"row_count"`
+	DurationMs float64          `json:"duration_ms"`
+	Truncated  bool             `json:"truncated"`
+}
+
+type ImportPreflightCheck struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type ImportPreflightExtension struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+type ImportPreflightForeignKey struct {
+	Constraint  string `json:"constraint"`
+	SourceTable string `json:"source_table"`
+	TargetTable string `json:"target_table"`
+}
+
+type ImportPreflightSource struct {
+	ServerVersion     string                     `json:"server_version"`
+	DatabaseSizeBytes int64                      `json:"database_size_bytes"`
+	Extensions        []ImportPreflightExtension `json:"extensions"`
+	// Provider-coupling facts (Supabase-style sources): schemas beyond public,
+	// FKs into provider-managed schemas, and tables with auth-bound RLS.
+	AppSchemas               []string                    `json:"app_schemas,omitempty"`
+	ProviderSchemas          []string                    `json:"provider_schemas,omitempty"`
+	ProviderAuthFKs          []ImportPreflightForeignKey `json:"provider_auth_fks,omitempty"`
+	ProviderAuthPolicyTables []string                    `json:"provider_auth_policy_tables,omitempty"`
+}
+
+type ImportPreflight struct {
+	OK                bool                   `json:"ok"`
+	Checks            []ImportPreflightCheck `json:"checks"`
+	Source            ImportPreflightSource  `json:"source"`
+	StorageLimitBytes int64                  `json:"storage_limit_bytes"`
+	TargetVersion     string                 `json:"target_version"`
+}
+
+// APIKey is an organization (or project-scoped) API key. Plaintext secrets
+// are never returned by list endpoints; only the prefix is shown.
+type APIKey = capydbclient.APIKey
+
+type CreateAPIKeyRequest = capydbclient.CreateAPIKeyRequest
+
+type WebhookEndpoint = capydbclient.WebhookEndpoint
+
+type CreateWebhookEndpointRequest = capydbclient.CreateWebhookEndpointRequest
+
+type WebhookDelivery struct {
+	Attempts       int        `json:"attempts"`
+	CreatedAt      time.Time  `json:"created_at"`
+	DeliveredAt    *time.Time `json:"delivered_at,omitempty"`
+	EndpointID     string     `json:"endpoint_id"`
+	EventType      string     `json:"event_type"`
+	ID             string     `json:"id"`
+	LastError      string     `json:"last_error,omitempty"`
+	MaxAttempts    int        `json:"max_attempts"`
+	NextAttemptAt  time.Time  `json:"next_attempt_at"`
+	OrganizationID string     `json:"organization_id"`
+	Payload        any        `json:"payload"`
+	ResponseStatus int        `json:"response_status,omitempty"`
+	State          string     `json:"state"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+type ProjectAuditEvent struct {
+	Action         string    `json:"action"`
+	ActorID        string    `json:"actor_id,omitempty"`
+	ActorKind      string    `json:"actor_kind"`
+	CreatedAt      time.Time `json:"created_at"`
+	ID             string    `json:"id"`
+	Metadata       any       `json:"metadata"`
+	OrganizationID string    `json:"organization_id"`
+	ProjectID      string    `json:"project_id,omitempty"`
+}
+
+// ProjectExtension describes a Postgres extension and whether it is enabled
+// for the project database.
+type ProjectExtension struct {
+	DefaultVersion string `json:"default_version"`
+	Description    string `json:"description"`
+	Enabled        bool   `json:"enabled"`
+	Name           string `json:"name"`
+	Trusted        bool   `json:"trusted"`
+}
+
+// ProjectAlert is a triggered resource alert (storage, connections, …) for a
+// project database.
+type ProjectAlert struct {
+	AcknowledgedAt *time.Time `json:"acknowledged_at,omitempty"`
+	ID             string     `json:"id"`
+	Kind           string     `json:"kind"`
+	LimitValue     float64    `json:"limit_value"`
+	ObservedValue  float64    `json:"observed_value"`
+	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
+	Severity       string     `json:"severity"`
+	TriggeredAt    time.Time  `json:"triggered_at"`
+}
+
+const defaultHTTPTimeout = 30 * time.Second
+
+// defaultUploadTimeout bounds dump uploads, which can far outlast the normal
+// API timeout but must not hang forever.
+const defaultUploadTimeout = 30 * time.Minute
+
+// resolveHTTPTimeout returns the HTTP client timeout, honouring the
+// CAPYDB_HTTP_TIMEOUT env var (a Go duration string such as "45s" or "2m").
+func resolveHTTPTimeout() (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv("CAPYDB_HTTP_TIMEOUT"))
+	if raw == "" {
+		return defaultHTTPTimeout, nil
 	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid CAPYDB_HTTP_TIMEOUT %q: %w (use a Go duration such as 30s or 2m)", raw, err)
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("invalid CAPYDB_HTTP_TIMEOUT %q: duration must be positive", raw)
+	}
+	return parsed, nil
+}
+
+// resolveUploadTimeout returns the overall dump-upload deadline. It defaults
+// to defaultUploadTimeout and honours an explicit CAPYDB_HTTP_TIMEOUT override.
+func resolveUploadTimeout() (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv("CAPYDB_HTTP_TIMEOUT"))
+	if raw == "" {
+		return defaultUploadTimeout, nil
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid CAPYDB_HTTP_TIMEOUT %q: %w (use a Go duration such as 30s or 2m)", raw, err)
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("invalid CAPYDB_HTTP_TIMEOUT %q: duration must be positive", raw)
+	}
+	return parsed, nil
+}
+
+// NewClient builds an API client. The version is the CLI build version and is
+// used for the User-Agent header; the long "1.2.3 (commit: …)" form is reduced
+// to its leading token.
+func NewClient(baseURL, apiKey, version string) (*Client, error) {
+	timeout, err := resolveHTTPTimeout()
+	if err != nil {
+		return nil, err
+	}
+
+	versionToken := "dev"
+	if fields := strings.Fields(strings.TrimSpace(version)); len(fields) > 0 {
+		versionToken = fields[0]
+	}
+
+	return &Client{
+		doer: &capydbclient.Doer{
+			APIKey:  strings.TrimSpace(apiKey),
+			BaseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+			HTTPClient: &http.Client{
+				Timeout: timeout,
+			},
+			UserAgent:    "capydb-cli/" + versionToken,
+			RetryBackoff: []time.Duration{0, time.Second, 3 * time.Second},
+		},
+	}, nil
 }
 
 func (c *Client) GetPublicStatus(ctx context.Context) (PublicStatusResponse, error) {
@@ -291,12 +470,9 @@ func (c *Client) StartCLILoginSession(ctx context.Context, request CLILoginSessi
 func (c *Client) PollCLILoginSession(ctx context.Context, sessionID, pollToken string) (CLILoginSessionStatus, error) {
 	var response CLILoginSessionStatus
 	path := "/v1/cli/login/sessions/" + strings.TrimSpace(sessionID)
-	if trimmed := strings.TrimSpace(pollToken); trimmed != "" {
-		values := url.Values{}
-		values.Set("poll_token", trimmed)
-		path += "?" + values.Encode()
-	}
-	if err := c.do(ctx, http.MethodGet, path, nil, &response); err != nil {
+	// The poll token is the sole secret gating minted-key delivery; it travels
+	// in a header so it never lands in server/proxy access logs.
+	if err := c.doWithHeader(ctx, http.MethodGet, path, nil, &response, "X-CapyDB-Poll-Token", strings.TrimSpace(pollToken)); err != nil {
 		return CLILoginSessionStatus{}, err
 	}
 	return response, nil
@@ -320,34 +496,205 @@ func (c *Client) CreateBackup(ctx context.Context, projectID, label string) (Job
 	return response.Job, nil
 }
 
-func (c *Client) CreateImport(ctx context.Context, projectID, sourceURL string, recreate bool) (Job, error) {
+// CreateImportRequest starts an import from exactly one of a live source
+// connection URL or a previously uploaded dump file's object key. Confirm is
+// required by the API (an import writes over the project's live database);
+// the command sets it only after its own typed-name gate.
+type CreateImportRequest struct {
+	Confirm   bool   `json:"confirm"`
+	Recreate  bool   `json:"recreate,omitempty"`
+	SourceURL string `json:"source_url,omitempty"`
+	UploadKey string `json:"upload_key,omitempty"`
+}
+
+func (c *Client) CreateImport(ctx context.Context, projectID string, request CreateImportRequest) (Job, error) {
+	request.SourceURL = strings.TrimSpace(request.SourceURL)
+	request.UploadKey = strings.TrimSpace(request.UploadKey)
+
 	var response struct {
 		Job Job `json:"job"`
 	}
-	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/imports", map[string]any{
-		"recreate":   recreate,
-		"source_url": strings.TrimSpace(sourceURL),
-	}, &response); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/imports", request, &response); err != nil {
 		return Job{}, err
 	}
 	return response.Job, nil
 }
 
-func (c *Client) CreatePreviewDatabase(ctx context.Context, projectID string, request CreatePreviewRequest) (PreviewDetails, Job, error) {
+// StartImportFollow begins a near-zero-downtime follow import from a live
+// source. The API requires an explicit confirm (the follower writes into the
+// project's live database from the start); the command gates before calling.
+func (c *Client) StartImportFollow(ctx context.Context, projectID, sourceURL string) (Job, error) {
+	request := struct {
+		Confirm   bool   `json:"confirm"`
+		SourceURL string `json:"source_url"`
+	}{Confirm: true, SourceURL: strings.TrimSpace(sourceURL)}
+	var response struct {
+		Job Job `json:"job"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/imports/follow", request, &response); err != nil {
+		return Job{}, err
+	}
+	return response.Job, nil
+}
+
+// ImportFollowStatus enqueues a follow-import status read; poll the returned job
+// for the status JSON in its result.
+func (c *Client) ImportFollowStatus(ctx context.Context, projectID string) (Job, error) {
+	var response struct {
+		Job Job `json:"job"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/imports/follow/status", nil, &response); err != nil {
+		return Job{}, err
+	}
+	return response.Job, nil
+}
+
+// UpdateProjectEnvironment flips a project's environment label between
+// production and non_production - the dial that gates overwrite-restore.
+func (c *Client) UpdateProjectEnvironment(ctx context.Context, projectID, environment string) (Project, error) {
+	var response struct {
+		Project Project `json:"project"`
+	}
+	body := map[string]string{"environment": environment}
+	if err := c.do(ctx, http.MethodPatch, "/v1/projects/"+projectID, body, &response); err != nil {
+		return Project{}, err
+	}
+	return response.Project, nil
+}
+
+// ImportFollowCutover finalizes a follow import (drains the stream, transfers
+// ownership, drops the source slot, flips the project live). The API requires
+// an explicit confirm: cutover replaces the project's live database.
+func (c *Client) ImportFollowCutover(ctx context.Context, projectID string) (Job, error) {
+	var response struct {
+		Job Job `json:"job"`
+	}
+	body := map[string]bool{"confirm": true}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/imports/follow/cutover", body, &response); err != nil {
+		return Job{}, err
+	}
+	return response.Job, nil
+}
+
+// ImportFollowAbort cancels an in-progress follow import.
+func (c *Client) ImportFollowAbort(ctx context.Context, projectID string) (Job, error) {
+	var response struct {
+		Job Job `json:"job"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/imports/follow/abort", nil, &response); err != nil {
+		return Job{}, err
+	}
+	return response.Job, nil
+}
+
+// ImportUpload is a presigned object-storage PUT slot for a pg_dump file.
+type ImportUpload struct {
+	ExpiresAt time.Time `json:"expires_at"`
+	ObjectKey string    `json:"object_key"`
+	UploadURL string    `json:"upload_url"`
+}
+
+// CreateImportUpload requests a presigned upload URL for a dump file destined
+// for an import into the project.
+func (c *Client) CreateImportUpload(ctx context.Context, projectID string) (ImportUpload, error) {
+	var response struct {
+		Upload ImportUpload `json:"upload"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/imports/uploads", nil, &response); err != nil {
+		return ImportUpload{}, err
+	}
+	return response.Upload, nil
+}
+
+// UploadDump streams a local dump file to a presigned PUT URL. The presigned
+// URL embeds its own authorization, so no API key header is sent. progress,
+// when non-nil, is invoked as bytes are read from the file (sent, total).
+// Uploads can far outlast the normal API timeout, so the overall deadline is
+// the upload timeout (default 30m, CAPYDB_HTTP_TIMEOUT overrides it) applied
+// via the context - cancelling ctx aborts the upload immediately.
+func (c *Client) UploadDump(ctx context.Context, uploadURL, filePath string, progress func(sent, total int64)) error {
+	timeout, err := resolveUploadTimeout()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("open dump file: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat dump file: %w", err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("dump path %s is a directory", filePath)
+	}
+
+	body := io.Reader(file)
+	if progress != nil {
+		body = &progressReader{reader: file, total: info.Size(), progress: progress}
+	}
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, body)
+	if err != nil {
+		return fmt.Errorf("build upload request: %w", err)
+	}
+	request.ContentLength = info.Size()
+	request.Header.Set("Content-Type", "application/octet-stream")
+	request.Header.Set("User-Agent", c.doer.UserAgent)
+
+	uploadClient := &http.Client{}
+	response, err := uploadClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("upload dump: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		detail := strings.TrimSpace(string(raw))
+		if detail != "" {
+			return fmt.Errorf("upload dump: storage returned status %d: %s", response.StatusCode, detail)
+		}
+		return fmt.Errorf("upload dump: storage returned status %d", response.StatusCode)
+	}
+	return nil
+}
+
+// progressReader reports cumulative bytes read to a callback so callers can
+// render upload progress.
+type progressReader struct {
+	progress func(sent, total int64)
+	reader   io.Reader
+	sent     int64
+	total    int64
+}
+
+func (r *progressReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		r.sent += int64(n)
+		r.progress(r.sent, r.total)
+	}
+	return n, err
+}
+
+// CreatePreviewDatabase queues a preview database and returns the created
+// preview plus the async job. Connection details are intentionally not fetched
+// here - callers decide whether a connection-fetch failure is fatal.
+func (c *Client) CreatePreviewDatabase(ctx context.Context, projectID string, request CreatePreviewRequest) (Preview, Job, error) {
 	var response struct {
 		Job     Job     `json:"job"`
 		Preview Preview `json:"preview"`
 	}
 	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/preview-databases", request, &response); err != nil {
-		return PreviewDetails{}, Job{}, err
+		return Preview{}, Job{}, err
 	}
-
-	details := PreviewDetails{Preview: response.Preview}
-	connections, err := c.GetPreviewConnection(ctx, response.Preview.ID)
-	if err == nil {
-		details.Connections = connections
-	}
-	return details, response.Job, nil
+	return response.Preview, response.Job, nil
 }
 
 func (c *Client) CreateRestore(ctx context.Context, projectID string, request CreateRestoreRequest) (Job, error) {
@@ -380,6 +727,96 @@ func (c *Client) GetJob(ctx context.Context, jobID string) (Job, error) {
 	return response.Job, nil
 }
 
+// GetJobResult fetches a job's structured result payload. The API returns a
+// result only for tenant-visible job types (currently
+// project.import_follow_status: unit_active, result, lag_bytes, sentinel);
+// for everything else this is nil. Decoded locally until capydbclient's Job
+// carries the field.
+func (c *Client) GetJobResult(ctx context.Context, jobID string) (json.RawMessage, error) {
+	var response struct {
+		Job struct {
+			Result json.RawMessage `json:"result"`
+		} `json:"job"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/jobs/"+jobID, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Job.Result, nil
+}
+
+// ListProjectJobs returns the project's recent lifecycle jobs, newest first.
+func (c *Client) ListProjectJobs(ctx context.Context, projectID string, limit int) ([]Job, error) {
+	path := "/v1/projects/" + projectID + "/jobs"
+	if limit > 0 {
+		values := url.Values{}
+		values.Set("limit", strconv.Itoa(limit))
+		path += "?" + values.Encode()
+	}
+
+	var response struct {
+		Jobs []Job `json:"jobs"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Jobs, nil
+}
+
+// ProjectLogEntry is one database log line: journal timestamp, severity parsed
+// from the Postgres log format, message, and the cursor that resumes a tail
+// strictly after this entry.
+type ProjectLogEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Severity  string    `json:"severity"`
+	Message   string    `json:"message"`
+	Cursor    string    `json:"cursor"`
+}
+
+// ProjectLogs is one log fetch: entries ascending by time plus the cursor to
+// resume a tail from (empty when the fetch returned nothing).
+type ProjectLogs struct {
+	Entries    []ProjectLogEntry `json:"entries"`
+	NextCursor string            `json:"next_cursor,omitempty"`
+}
+
+// ProjectLogsQuery parameterizes one log fetch. Cursor (tail mode) takes
+// precedence over Hours (window mode).
+type ProjectLogsQuery struct {
+	Cursor     string
+	Hours      int
+	Limit      int
+	Severities []string
+}
+
+// GetProjectLogs fetches one window (or tail increment) of the project's
+// database logs.
+func (c *Client) GetProjectLogs(ctx context.Context, projectID string, query ProjectLogsQuery) (ProjectLogs, error) {
+	values := url.Values{}
+	if query.Cursor != "" {
+		values.Set("cursor", query.Cursor)
+	} else if query.Hours > 0 {
+		values.Set("hours", strconv.Itoa(query.Hours))
+	}
+	if query.Limit > 0 {
+		values.Set("limit", strconv.Itoa(query.Limit))
+	}
+	if len(query.Severities) > 0 {
+		values.Set("severity", strings.Join(query.Severities, ","))
+	}
+	path := "/v1/projects/" + projectID + "/logs"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+
+	var response struct {
+		Logs ProjectLogs `json:"logs"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return ProjectLogs{}, err
+	}
+	return response.Logs, nil
+}
+
 func (c *Client) GetProject(ctx context.Context, projectID string) (Project, ProjectConnectionInfo, error) {
 	var response struct {
 		Project Project `json:"project"`
@@ -410,6 +847,39 @@ func (c *Client) GetProjectObservability(ctx context.Context, projectID string) 
 	return response.Observability, nil
 }
 
+// RunSQL executes a read-mostly SQL query against the project database via the
+// control plane. maxRows of 0 leaves the server default in place.
+func (c *Client) RunSQL(ctx context.Context, projectID, query string, maxRows int) (SQLResult, error) {
+	payload := map[string]any{
+		"query": query,
+	}
+	if maxRows > 0 {
+		payload["max_rows"] = maxRows
+	}
+
+	var response struct {
+		Result SQLResult `json:"result"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/sql", payload, &response); err != nil {
+		return SQLResult{}, err
+	}
+	return response.Result, nil
+}
+
+// ImportPreflight checks a source database against the project before an
+// import is queued.
+func (c *Client) ImportPreflight(ctx context.Context, projectID, sourceURL string) (ImportPreflight, error) {
+	var response struct {
+		Preflight ImportPreflight `json:"preflight"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/imports/preflight", map[string]string{
+		"source_url": strings.TrimSpace(sourceURL),
+	}, &response); err != nil {
+		return ImportPreflight{}, err
+	}
+	return response.Preflight, nil
+}
+
 func (c *Client) ListBackups(ctx context.Context, projectID string) ([]Backup, error) {
 	var response struct {
 		Backups []Backup `json:"backups"`
@@ -420,14 +890,54 @@ func (c *Client) ListBackups(ctx context.Context, projectID string) ([]Backup, e
 	return response.Backups, nil
 }
 
-func (c *Client) ListClusters(ctx context.Context) ([]Cluster, error) {
+func (c *Client) ListScheduledBackups(ctx context.Context, projectID string) ([]ScheduledBackup, error) {
 	var response struct {
-		Clusters []Cluster `json:"clusters"`
+		ScheduledBackups []ScheduledBackup `json:"scheduled_backups"`
 	}
-	if err := c.do(ctx, http.MethodGet, "/v1/clusters", nil, &response); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/v1/projects/"+projectID+"/scheduled-backups", nil, &response); err != nil {
 		return nil, err
 	}
-	return response.Clusters, nil
+	return response.ScheduledBackups, nil
+}
+
+// UpsertScheduledBackup creates or replaces the project's default backup
+// schedule and returns the stored schedule.
+func (c *Client) UpsertScheduledBackup(ctx context.Context, projectID string, request UpsertScheduledBackupRequest) (ScheduledBackup, error) {
+	var response struct {
+		ScheduledBackup ScheduledBackup `json:"scheduled_backup"`
+	}
+	if err := c.do(ctx, http.MethodPut, "/v1/projects/"+projectID+"/scheduled-backups/default", request, &response); err != nil {
+		return ScheduledBackup{}, err
+	}
+	return response.ScheduledBackup, nil
+}
+
+// RotateCredentials queues a rotation of the project's database credential.
+// With graceHours 0 the previous connection strings stop working once the job
+// completes. With graceHours > 0 a new database username is issued and the
+// outgoing credential keeps authenticating until the window ends (max 720).
+func (c *Client) RotateCredentials(ctx context.Context, projectID string, graceHours int) (Job, error) {
+	var response struct {
+		Job Job `json:"job"`
+	}
+	var body any
+	if graceHours > 0 {
+		body = map[string]int{"grace_hours": graceHours}
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/credentials/rotate", body, &response); err != nil {
+		return Job{}, err
+	}
+	return response.Job, nil
+}
+
+func (c *Client) ListRegions(ctx context.Context) ([]string, error) {
+	var response struct {
+		Regions []string `json:"regions"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/regions", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Regions, nil
 }
 
 func (c *Client) ListPreviewDatabases(ctx context.Context, projectID string) ([]PreviewDetails, error) {
@@ -518,55 +1028,235 @@ func (c *Client) DeleteRestorePoint(ctx context.Context, projectID, restorePoint
 	return c.do(ctx, http.MethodDelete, "/v1/projects/"+projectID+"/restore-points/"+restorePointID, nil, nil)
 }
 
+func (c *Client) GetOrganization(ctx context.Context, orgID string) (Organization, error) {
+	var response struct {
+		Organization Organization `json:"organization"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/organizations/"+orgID, nil, &response); err != nil {
+		return Organization{}, err
+	}
+	return response.Organization, nil
+}
+
+func (c *Client) ListAPIKeys(ctx context.Context, orgID string) ([]APIKey, error) {
+	var response struct {
+		APIKeys []APIKey `json:"api_keys"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/organizations/"+orgID+"/api-keys", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.APIKeys, nil
+}
+
+// CreateAPIKey creates an org-wide or project-scoped key. The plaintext key is
+// returned exactly once.
+func (c *Client) CreateAPIKey(ctx context.Context, orgID string, request CreateAPIKeyRequest) (APIKey, string, error) {
+	var response struct {
+		APIKey       APIKey `json:"api_key"`
+		PlaintextKey string `json:"plaintext_api_key"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/organizations/"+orgID+"/api-keys", request, &response); err != nil {
+		return APIKey{}, "", err
+	}
+	return response.APIKey, response.PlaintextKey, nil
+}
+
+func (c *Client) RevokeAPIKey(ctx context.Context, orgID, keyID string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/organizations/"+orgID+"/api-keys/"+keyID, nil, nil)
+}
+
+func (c *Client) ListWebhookEndpoints(ctx context.Context, orgID string) ([]WebhookEndpoint, error) {
+	var response struct {
+		WebhookEndpoints []WebhookEndpoint `json:"webhook_endpoints"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/organizations/"+orgID+"/webhook-endpoints", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.WebhookEndpoints, nil
+}
+
+// CreateWebhookEndpoint registers an outbound webhook receiver. The signing
+// secret is returned exactly once.
+func (c *Client) CreateWebhookEndpoint(ctx context.Context, orgID string, request CreateWebhookEndpointRequest) (WebhookEndpoint, string, error) {
+	var response struct {
+		WebhookEndpoint WebhookEndpoint `json:"webhook_endpoint"`
+		PlaintextSecret string          `json:"plaintext_secret"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/organizations/"+orgID+"/webhook-endpoints", request, &response); err != nil {
+		return WebhookEndpoint{}, "", err
+	}
+	return response.WebhookEndpoint, response.PlaintextSecret, nil
+}
+
+func (c *Client) DeleteWebhookEndpoint(ctx context.Context, orgID, endpointID string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/organizations/"+orgID+"/webhook-endpoints/"+endpointID, nil, nil)
+}
+
+// RotateWebhookEndpointSecret generates a new signing secret and returns it
+// exactly once.
+func (c *Client) RotateWebhookEndpointSecret(ctx context.Context, orgID, endpointID string) (WebhookEndpoint, string, error) {
+	var response struct {
+		WebhookEndpoint WebhookEndpoint `json:"webhook_endpoint"`
+		PlaintextSecret string          `json:"plaintext_secret"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/organizations/"+orgID+"/webhook-endpoints/"+endpointID+"/rotate-secret", nil, &response); err != nil {
+		return WebhookEndpoint{}, "", err
+	}
+	return response.WebhookEndpoint, response.PlaintextSecret, nil
+}
+
+func (c *Client) ListWebhookDeliveries(ctx context.Context, orgID, endpointID string, limit int) ([]WebhookDelivery, error) {
+	path := "/v1/organizations/" + orgID + "/webhook-endpoints/" + endpointID + "/deliveries"
+	if limit > 0 {
+		values := url.Values{}
+		values.Set("limit", strconv.Itoa(limit))
+		path += "?" + values.Encode()
+	}
+
+	var response struct {
+		Deliveries []WebhookDelivery `json:"deliveries"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Deliveries, nil
+}
+
+func (c *Client) ListProjectAuditEvents(ctx context.Context, projectID string, limit int) ([]ProjectAuditEvent, error) {
+	path := "/v1/projects/" + projectID + "/audit-events"
+	if limit > 0 {
+		values := url.Values{}
+		values.Set("limit", strconv.Itoa(limit))
+		path += "?" + values.Encode()
+	}
+
+	var response struct {
+		AuditEvents []ProjectAuditEvent `json:"audit_events"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.AuditEvents, nil
+}
+
+func (c *Client) ListProjectExtensions(ctx context.Context, projectID string) ([]ProjectExtension, error) {
+	var response struct {
+		Extensions []ProjectExtension `json:"extensions"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/projects/"+projectID+"/extensions", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Extensions, nil
+}
+
+// EnableProjectExtension queues enabling a Postgres extension and returns the
+// async job.
+func (c *Client) EnableProjectExtension(ctx context.Context, projectID, name string) (Job, error) {
+	var response struct {
+		Job Job `json:"job"`
+	}
+	payload := map[string]string{"name": strings.TrimSpace(name)}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/extensions", payload, &response); err != nil {
+		return Job{}, err
+	}
+	return response.Job, nil
+}
+
+// DisableProjectExtension queues dropping a Postgres extension and returns the
+// async job.
+func (c *Client) DisableProjectExtension(ctx context.Context, projectID, name string) (Job, error) {
+	var response struct {
+		Job Job `json:"job"`
+	}
+	if err := c.do(ctx, http.MethodDelete, "/v1/projects/"+projectID+"/extensions/"+url.PathEscape(strings.TrimSpace(name)), nil, &response); err != nil {
+		return Job{}, err
+	}
+	return response.Job, nil
+}
+
+func (c *Client) ListProjectAlerts(ctx context.Context, projectID string) ([]ProjectAlert, error) {
+	var response struct {
+		Alerts []ProjectAlert `json:"alerts"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/projects/"+projectID+"/alerts", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Alerts, nil
+}
+
+func (c *Client) AcknowledgeProjectAlert(ctx context.Context, projectID, alertID string) error {
+	return c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/alerts/"+alertID+"/acknowledge", nil, nil)
+}
+
+// GetProjectSchema fetches the canonical schema document for the project's
+// database.
+func (c *Client) GetProjectSchema(ctx context.Context, projectID string) (DatabaseSchema, error) {
+	var response struct {
+		Schema DatabaseSchema `json:"schema"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/projects/"+projectID+"/schema", nil, &response); err != nil {
+		return DatabaseSchema{}, err
+	}
+	return response.Schema, nil
+}
+
+// GetPreviewSchema fetches the canonical schema document for a preview
+// database.
+func (c *Client) GetPreviewSchema(ctx context.Context, previewID string) (DatabaseSchema, error) {
+	var response struct {
+		Schema DatabaseSchema `json:"schema"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/preview-databases/"+previewID+"/schema", nil, &response); err != nil {
+		return DatabaseSchema{}, err
+	}
+	return response.Schema, nil
+}
+
+// GenerateProjectSchemaTypes generates source code (typescript, zod or
+// drizzle) from the project database's live schema. style applies to
+// typescript output only.
+func (c *Client) GenerateProjectSchemaTypes(ctx context.Context, projectID, language, style string) (GeneratedTypes, error) {
+	return c.generateSchemaTypes(ctx, "/v1/projects/"+projectID+"/schema/types", language, style)
+}
+
+// GeneratePreviewSchemaTypes is GenerateProjectSchemaTypes against a preview
+// database.
+func (c *Client) GeneratePreviewSchemaTypes(ctx context.Context, previewID, language, style string) (GeneratedTypes, error) {
+	return c.generateSchemaTypes(ctx, "/v1/preview-databases/"+previewID+"/schema/types", language, style)
+}
+
+func (c *Client) generateSchemaTypes(ctx context.Context, basePath, language, style string) (GeneratedTypes, error) {
+	query := url.Values{}
+	if strings.TrimSpace(language) != "" {
+		query.Set("language", strings.TrimSpace(language))
+	}
+	if strings.TrimSpace(style) != "" {
+		query.Set("style", strings.TrimSpace(style))
+	}
+	path := basePath
+	if len(query) > 0 {
+		path += "?" + query.Encode()
+	}
+
+	var response struct {
+		Types GeneratedTypes `json:"types"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return GeneratedTypes{}, err
+	}
+	return response.Types, nil
+}
+
+// do executes an API request via the shared transport. Idempotent GET requests
+// are retried on network errors and 5xx responses following the client's retry
+// backoff (default three attempts with 0s/1s/3s delays); non-GET requests are
+// never retried.
 func (c *Client) do(ctx context.Context, method, path string, payload any, dest any) error {
-	var body io.Reader
-	if payload != nil {
-		encoded, err := json.Marshal(payload)
-		if err != nil {
-			return fmt.Errorf("encode request body: %w", err)
-		}
-		body = bytes.NewReader(encoded)
-	}
+	return c.doer.Do(ctx, method, path, payload, dest)
+}
 
-	request, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	request.Header.Set("Accept", "application/json")
-	if payload != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	if c.apiKey != "" {
-		request.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
-
-	response, err := c.httpClient.Do(request)
-	if err != nil {
-		return fmt.Errorf("perform request: %w", err)
-	}
-	defer func() { _ = response.Body.Close() }()
-
-	raw, err := io.ReadAll(response.Body)
-	if err != nil {
-		return fmt.Errorf("read response body: %w", err)
-	}
-
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		var payload struct {
-			Error string `json:"error"`
-		}
-		_ = json.Unmarshal(raw, &payload)
-		return &APIError{
-			Message:    payload.Error,
-			StatusCode: response.StatusCode,
-		}
-	}
-
-	if dest == nil || len(raw) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(raw, dest); err != nil {
-		return fmt.Errorf("decode response body: %w", err)
-	}
-	return nil
+// doWithHeader is do with one extra request header - used for secrets that must
+// not appear in the URL (e.g. the device-login poll token).
+func (c *Client) doWithHeader(ctx context.Context, method, path string, payload any, dest any, headerKey, headerValue string) error {
+	return c.doer.Do(ctx, method, path, payload, dest, capydbclient.Header{Key: headerKey, Value: headerValue})
 }

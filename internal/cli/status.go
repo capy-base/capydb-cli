@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -17,128 +18,291 @@ type statusOptions struct {
 	remote     bool
 }
 
+type statusOrganization struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+	Slug string `json:"slug,omitempty"`
+}
+
+type statusLinkedProject struct {
+	ProjectID     string `json:"project_id"`
+	ProjectName   string `json:"project_name"`
+	ProjectSlug   string `json:"project_slug,omitempty"`
+	AppPath       string `json:"app_path"`
+	Profile       string `json:"profile,omitempty"`
+	Framework     string `json:"framework,omitempty"`
+	DatabaseLayer string `json:"database_layer,omitempty"`
+	EnvFile       string `json:"env_file"`
+}
+
+type statusAPIComponent struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+}
+
+type statusAPIHealth struct {
+	Status     string               `json:"status"`
+	CheckedAt  *time.Time           `json:"checked_at,omitempty"`
+	Error      string               `json:"error,omitempty"`
+	Components []statusAPIComponent `json:"components"`
+}
+
+type statusRemoteProject struct {
+	ID                 string                    `json:"id"`
+	Name               string                    `json:"name"`
+	State              string                    `json:"state"`
+	Environment        string                    `json:"environment,omitempty"`
+	LastError          string                    `json:"last_error,omitempty"`
+	LatestJob          *api.Job                  `json:"latest_job,omitempty"`
+	LatestJobError     string                    `json:"latest_job_error,omitempty"`
+	Observability      *api.ProjectObservability `json:"observability,omitempty"`
+	ObservabilityError string                    `json:"observability_error,omitempty"`
+	BackupCount        *int                      `json:"backup_count,omitempty"`
+	LatestBackup       *api.Backup               `json:"latest_backup,omitempty"`
+	BackupsError       string                    `json:"backups_error,omitempty"`
+}
+
+type statusReport struct {
+	LoggedIn      bool                 `json:"logged_in"`
+	APIURL        string               `json:"api_url,omitempty"`
+	AppURL        string               `json:"app_url,omitempty"`
+	Organization  *statusOrganization  `json:"organization"`
+	LinkedProject *statusLinkedProject `json:"linked_project"`
+	API           *statusAPIHealth     `json:"api,omitempty"`
+	RemoteProject *statusRemoteProject `json:"remote_project,omitempty"`
+}
+
 func (a *app) runStatus(cmd *cobra.Command, options statusOptions) error {
+	report, err := a.buildStatusReport(cmd, options)
+	if err != nil {
+		return err
+	}
+
+	if a.jsonOutput() {
+		return printJSON(cmd.OutOrStdout(), report)
+	}
+	writeStatusReport(cmd, report, options)
+	return nil
+}
+
+func (a *app) buildStatusReport(cmd *cobra.Command, options statusOptions) (statusReport, error) {
 	ctx := cmd.Context()
 	userConfig, userErr := config.LoadUserConfig()
 	projectConfig, projectErr := config.LoadProjectConfig(a.cwd)
 
 	if userErr != nil && !errors.Is(userErr, os.ErrNotExist) {
-		return userErr
+		return statusReport{}, userErr
 	}
 	if projectErr != nil && !errors.Is(projectErr, os.ErrNotExist) {
-		return projectErr
+		return statusReport{}, projectErr
 	}
 
-	if strings.TrimSpace(userConfig.APIKey) != "" {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "logged_in: yes\n")
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_url: %s\n", userConfig.APIURL)
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "app_url: %s\n", userConfig.AppURL)
-		if strings.TrimSpace(userConfig.OrganizationID) != "" {
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "organization_id: %s\n", userConfig.OrganizationID)
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "organization_name: %s\n", firstNonEmpty(userConfig.OrganizationName, "-"))
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "organization_slug: %s\n", firstNonEmpty(userConfig.OrganizationSlug, "-"))
+	report := statusReport{}
+	activeOrgID, activeEntry, hasActive := userConfig.Active()
+	if hasActive && strings.TrimSpace(activeEntry.APIKey) != "" {
+		report.LoggedIn = true
+		report.APIURL = userConfig.APIURL()
+		report.AppURL = userConfig.AppURL()
+		if activeOrgID != config.DefaultOrgKey {
+			report.Organization = &statusOrganization{
+				ID:   activeOrgID,
+				Name: activeEntry.Name,
+				Slug: activeEntry.Slug,
+			}
 		}
-	} else {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "logged_in: no\n")
 	}
 
 	linked := !errors.Is(projectErr, os.ErrNotExist)
-	if !linked {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "linked_project: no\n")
-	} else {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "linked_project: yes\n")
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "project_id: %s\n", projectConfig.ProjectID)
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "project_name: %s\n", projectConfig.ProjectName)
-		if strings.TrimSpace(projectConfig.ProjectSlug) != "" {
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "project_slug: %s\n", projectConfig.ProjectSlug)
+	if linked {
+		report.LinkedProject = &statusLinkedProject{
+			ProjectID:     projectConfig.ProjectID,
+			ProjectName:   projectConfig.ProjectName,
+			ProjectSlug:   projectConfig.ProjectSlug,
+			AppPath:       firstNonEmpty(projectConfig.AppPath, "."),
+			Profile:       firstNonEmpty(projectConfig.Profile, projectConfig.Framework),
+			Framework:     projectConfig.Framework,
+			DatabaseLayer: projectConfig.DatabaseLayer,
+			EnvFile:       projectConfig.EnvFile,
 		}
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "app_path: %s\n", firstNonEmpty(projectConfig.AppPath, "."))
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "profile: %s\n", firstNonEmpty(projectConfig.Profile, projectConfig.Framework))
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "framework: %s\n", firstNonEmpty(projectConfig.Framework, "-"))
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "database_layer: %s\n", firstNonEmpty(projectConfig.DatabaseLayer, "-"))
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "env_file: %s\n", projectConfig.EnvFile)
 	}
 
 	if !options.remote && strings.TrimSpace(options.projectRef) == "" {
-		return nil
+		return report, nil
 	}
 
-	apiURL := a.resolveAPIURL(firstNonEmpty(projectConfig.APIURL, userConfig.APIURL))
-	publicStatus, err := api.NewClient(apiURL, "").GetPublicStatus(ctx)
+	apiURL := a.resolveAPIURL(firstNonEmpty(projectConfig.APIURL, report.APIURL))
+	anonymousClient, err := a.newAPIClient(apiURL, "")
 	if err != nil {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_status: unavailable\n")
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_status_error: %s\n", err)
+		return statusReport{}, err
+	}
+	report.API = &statusAPIHealth{Components: []statusAPIComponent{}}
+	publicStatus, err := anonymousClient.GetPublicStatus(ctx)
+	if err != nil {
+		report.API.Status = "unavailable"
+		report.API.Error = err.Error()
 	} else {
-		writePublicStatus(cmd, publicStatus)
+		report.API.Status = firstNonEmpty(publicStatus.Status, "-")
+		if !publicStatus.UpdatedAt.IsZero() {
+			checkedAt := publicStatus.UpdatedAt
+			report.API.CheckedAt = &checkedAt
+		}
+		for _, component := range publicStatus.Components {
+			report.API.Components = append(report.API.Components, statusAPIComponent{
+				Name:    component.Name,
+				Status:  component.Status,
+				Message: component.Message,
+			})
+		}
 	}
 
 	if strings.TrimSpace(options.projectRef) == "" && !linked {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "remote_project: not_checked\n")
-		return nil
+		return report, nil
 	}
 
 	client, _, err := a.resolveClient(false, apiURL)
 	if err != nil {
-		return err
+		return statusReport{}, err
 	}
 
 	project, err := a.resolveProject(ctx, client, options.projectRef)
 	if err != nil {
-		return err
+		return statusReport{}, err
 	}
 
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "remote_project: yes\n")
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "remote_project_id: %s\n", project.ID)
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "remote_project_name: %s\n", project.Name)
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "remote_project_state: %s\n", firstNonEmpty(project.State, "-"))
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "remote_project_environment: %s\n", firstNonEmpty(project.Environment, "-"))
-	if strings.TrimSpace(project.LastError) != "" {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "remote_project_error: %s\n", project.LastError)
+	remote := &statusRemoteProject{
+		ID:          project.ID,
+		Name:        project.Name,
+		State:       firstNonEmpty(project.State, "-"),
+		Environment: project.Environment,
+		LastError:   project.LastError,
 	}
+	report.RemoteProject = remote
 
 	if strings.TrimSpace(project.LatestJobID) != "" {
 		job, err := client.GetJob(ctx, project.LatestJobID)
 		if err != nil {
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_job_error: %s\n", err)
+			remote.LatestJobError = err.Error()
 		} else {
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_job_id: %s\n", job.ID)
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_job_type: %s\n", firstNonEmpty(job.Type, "-"))
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_job_state: %s\n", firstNonEmpty(job.State, "-"))
+			remote.LatestJob = &job
 		}
 	}
 
 	observability, err := client.GetProjectObservability(ctx, project.ID)
 	if err != nil {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "observability_error: %s\n", err)
+		remote.ObservabilityError = err.Error()
 	} else {
-		writeProjectObservability(cmd, observability)
+		remote.Observability = &observability
 	}
 
 	backups, err := client.ListBackups(ctx, project.ID)
 	if err != nil {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "backups_error: %s\n", err)
-		return nil
+		remote.BackupsError = err.Error()
+		return report, nil
 	}
-
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "backup_count: %d\n", len(backups))
+	count := len(backups)
+	remote.BackupCount = &count
 	if latest, ok := latestBackup(backups); ok {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_backup_id: %s\n", latest.ID)
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_backup_state: %s\n", firstNonEmpty(latest.State, "-"))
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_backup_verify: %s\n", firstNonEmpty(latest.VerificationState, "-"))
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "latest_backup_created_at: %s\n", formatTime(latest.CreatedAt))
+		remote.LatestBackup = &latest
 	}
-	return nil
+	return report, nil
 }
 
-func writePublicStatus(cmd *cobra.Command, status api.PublicStatusResponse) {
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_status: %s\n", firstNonEmpty(status.Status, "-"))
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_checked_at: %s\n", formatTime(status.UpdatedAt))
-	for _, component := range status.Components {
-		key := strings.ToLower(strings.NewReplacer(" ", "_", "-", "_").Replace(component.Name))
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_component_%s: %s\n", key, firstNonEmpty(component.Status, "-"))
-		if strings.TrimSpace(component.Message) != "" {
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_component_%s_message: %s\n", key, component.Message)
+func writeStatusReport(cmd *cobra.Command, report statusReport, options statusOptions) {
+	out := cmd.OutOrStdout()
+
+	if report.LoggedIn {
+		_, _ = fmt.Fprintf(out, "logged_in: yes\n")
+		_, _ = fmt.Fprintf(out, "api_url: %s\n", report.APIURL)
+		_, _ = fmt.Fprintf(out, "app_url: %s\n", report.AppURL)
+		if report.Organization != nil {
+			_, _ = fmt.Fprintf(out, "organization_id: %s\n", report.Organization.ID)
+			_, _ = fmt.Fprintf(out, "organization_name: %s\n", firstNonEmpty(report.Organization.Name, "-"))
+			_, _ = fmt.Fprintf(out, "organization_slug: %s\n", firstNonEmpty(report.Organization.Slug, "-"))
 		}
+	} else {
+		_, _ = fmt.Fprintf(out, "logged_in: no\n")
+	}
+
+	if report.LinkedProject == nil {
+		_, _ = fmt.Fprintf(out, "linked_project: no\n")
+	} else {
+		linkedProject := report.LinkedProject
+		_, _ = fmt.Fprintf(out, "linked_project: yes\n")
+		_, _ = fmt.Fprintf(out, "project_id: %s\n", linkedProject.ProjectID)
+		_, _ = fmt.Fprintf(out, "project_name: %s\n", linkedProject.ProjectName)
+		if strings.TrimSpace(linkedProject.ProjectSlug) != "" {
+			_, _ = fmt.Fprintf(out, "project_slug: %s\n", linkedProject.ProjectSlug)
+		}
+		_, _ = fmt.Fprintf(out, "app_path: %s\n", linkedProject.AppPath)
+		_, _ = fmt.Fprintf(out, "profile: %s\n", linkedProject.Profile)
+		_, _ = fmt.Fprintf(out, "framework: %s\n", firstNonEmpty(linkedProject.Framework, "-"))
+		_, _ = fmt.Fprintf(out, "database_layer: %s\n", firstNonEmpty(linkedProject.DatabaseLayer, "-"))
+		_, _ = fmt.Fprintf(out, "env_file: %s\n", linkedProject.EnvFile)
+	}
+
+	if report.API == nil {
+		return
+	}
+
+	_, _ = fmt.Fprintf(out, "api_status: %s\n", report.API.Status)
+	if strings.TrimSpace(report.API.Error) != "" {
+		_, _ = fmt.Fprintf(out, "api_status_error: %s\n", report.API.Error)
+	}
+	if report.API.CheckedAt != nil {
+		_, _ = fmt.Fprintf(out, "api_checked_at: %s\n", formatTime(*report.API.CheckedAt))
+	}
+	for _, component := range report.API.Components {
+		key := strings.ToLower(strings.NewReplacer(" ", "_", "-", "_").Replace(component.Name))
+		_, _ = fmt.Fprintf(out, "api_component_%s: %s\n", key, firstNonEmpty(component.Status, "-"))
+		if strings.TrimSpace(component.Message) != "" {
+			_, _ = fmt.Fprintf(out, "api_component_%s_message: %s\n", key, component.Message)
+		}
+	}
+
+	if report.RemoteProject == nil {
+		if strings.TrimSpace(options.projectRef) == "" && report.LinkedProject == nil {
+			_, _ = fmt.Fprintf(out, "remote_project: not_checked\n")
+		}
+		return
+	}
+
+	remote := report.RemoteProject
+	_, _ = fmt.Fprintf(out, "remote_project: yes\n")
+	_, _ = fmt.Fprintf(out, "remote_project_id: %s\n", remote.ID)
+	_, _ = fmt.Fprintf(out, "remote_project_name: %s\n", remote.Name)
+	_, _ = fmt.Fprintf(out, "remote_project_state: %s\n", remote.State)
+	_, _ = fmt.Fprintf(out, "remote_project_environment: %s\n", firstNonEmpty(remote.Environment, "-"))
+	if strings.TrimSpace(remote.LastError) != "" {
+		_, _ = fmt.Fprintf(out, "remote_project_error: %s\n", remote.LastError)
+	}
+
+	if strings.TrimSpace(remote.LatestJobError) != "" {
+		_, _ = fmt.Fprintf(out, "latest_job_error: %s\n", remote.LatestJobError)
+	} else if remote.LatestJob != nil {
+		_, _ = fmt.Fprintf(out, "latest_job_id: %s\n", remote.LatestJob.ID)
+		_, _ = fmt.Fprintf(out, "latest_job_type: %s\n", firstNonEmpty(remote.LatestJob.Type, "-"))
+		_, _ = fmt.Fprintf(out, "latest_job_state: %s\n", firstNonEmpty(remote.LatestJob.State, "-"))
+	}
+
+	if strings.TrimSpace(remote.ObservabilityError) != "" {
+		_, _ = fmt.Fprintf(out, "observability_error: %s\n", remote.ObservabilityError)
+	} else if remote.Observability != nil {
+		writeProjectObservability(cmd, *remote.Observability)
+	}
+
+	if strings.TrimSpace(remote.BackupsError) != "" {
+		_, _ = fmt.Fprintf(out, "backups_error: %s\n", remote.BackupsError)
+		return
+	}
+	if remote.BackupCount != nil {
+		_, _ = fmt.Fprintf(out, "backup_count: %d\n", *remote.BackupCount)
+	}
+	if remote.LatestBackup != nil {
+		_, _ = fmt.Fprintf(out, "latest_backup_id: %s\n", remote.LatestBackup.ID)
+		_, _ = fmt.Fprintf(out, "latest_backup_state: %s\n", firstNonEmpty(remote.LatestBackup.State, "-"))
+		_, _ = fmt.Fprintf(out, "latest_backup_verify: %s\n", firstNonEmpty(remote.LatestBackup.VerificationState, "-"))
+		_, _ = fmt.Fprintf(out, "latest_backup_created_at: %s\n", formatTime(remote.LatestBackup.CreatedAt))
 	}
 }
 

@@ -18,7 +18,7 @@ func TestUpsertPreservesCommentsAndUpdatesExistingKeys(t *testing.T) {
 	}
 
 	err := Upsert(path, map[string]string{
-		"DATABASE_URL":        "postgres://new",
+		"DATABASE_URL":      "postgres://new",
 		"DATABASE_POOL_URL": "postgres://pooled",
 	})
 	if err != nil {

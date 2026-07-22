@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/signal"
@@ -20,15 +21,24 @@ import (
 	"github.com/capy-base/capydb/cli/internal/api"
 	"github.com/capy-base/capydb/cli/internal/config"
 	"github.com/capy-base/capydb/cli/internal/envfile"
+	"github.com/capy-base/capydb/cli/internal/exitcode"
 	"github.com/capy-base/capydb/cli/internal/gitignore"
 	"github.com/capy-base/capydb/cli/internal/project"
 )
 
 type app struct {
-	apiKey string
-	apiURL string
-	appURL string
-	cwd    string
+	apiKey  string
+	apiURL  string
+	appURL  string
+	cwd     string
+	output  string
+	version string
+}
+
+// newAPIClient builds an API client carrying the CLI build version so the
+// User-Agent header identifies the binary.
+func (a *app) newAPIClient(baseURL, apiKey string) (*api.Client, error) {
+	return api.NewClient(baseURL, apiKey, a.version)
 }
 
 type resolvedAuth struct {
@@ -60,17 +70,36 @@ func newRootCommand(application *app, version string) *cobra.Command {
 	if strings.TrimSpace(version) == "" {
 		version = "dev (built from source)"
 	}
+	application.version = version
 
 	root := &cobra.Command{
-		Use:     "capydb",
-		Short:   "CapyDB Postgres project CLI",
-		Long:    "CapyDB links local projects to hosted Postgres databases, writes the right env vars, and handles repeatable project workflows.",
+		Use:   "capydb",
+		Short: "CapyDB Postgres project CLI",
+		Long: `CapyDB links local projects to hosted Postgres databases, writes the right env vars, and handles repeatable project workflows. Every project runs in its own isolated database cell - a dedicated Postgres runtime you reach with normal connection strings.
+
+Exit codes:
+  0  success
+  1  generic error
+  2  usage or validation error
+  3  authentication or authorization error
+  4  resource not found
+  5  conflict or failed precondition
+  6  timeout`,
 		Version: version,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			return validateOutputMode(application.output)
+		},
 	}
 
 	root.PersistentFlags().StringVar(&application.apiURL, "api-url", "", "CapyDB API base URL")
 	root.PersistentFlags().StringVar(&application.apiKey, "api-key", "", "CapyDB organization API key")
 	root.PersistentFlags().StringVar(&application.appURL, "app-url", "", "CapyDB app URL for browser-based login and dashboard links")
+	root.PersistentFlags().StringVarP(&application.output, "output", "o", outputText, "Output format: text or json")
+
+	// Flag parse failures are usage errors (exit code 2).
+	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return exitcode.New(exitcode.UsageError, err)
+	})
 
 	root.AddCommand(application.newLoginCommand())
 	root.AddCommand(application.newLogoutCommand())
@@ -81,14 +110,35 @@ func newRootCommand(application *app, version string) *cobra.Command {
 	root.AddCommand(application.newLinkCommand())
 	root.AddCommand(application.newUnlinkCommand())
 	root.AddCommand(application.newEnvCommand())
+	root.AddCommand(application.newInitCommand())
+	root.AddCommand(application.newGenerateCommand())
+	root.AddCommand(application.newSchemaCommand())
 	root.AddCommand(application.newPreviewCommand())
 	root.AddCommand(application.newBackupsCommand())
 	root.AddCommand(application.newImportCommand())
+	root.AddCommand(application.newMigrateCommand())
 	root.AddCommand(application.newRestoreCommand())
 	root.AddCommand(application.newRestorePointsCommand())
 	root.AddCommand(application.newJobsCommand())
 	root.AddCommand(application.newStudioCommand())
 	root.AddCommand(application.newIntegrationsCommand())
+	root.AddCommand(application.newConnectionStringCommand())
+	root.AddCommand(application.newCredentialsCommand())
+	root.AddCommand(application.newPsqlCommand())
+	root.AddCommand(application.newSQLCommand())
+	root.AddCommand(application.newMetricsCommand())
+	root.AddCommand(application.newLogsCommand())
+	root.AddCommand(application.newProjectsCommand())
+	root.AddCommand(application.newRegionsCommand())
+	root.AddCommand(application.newOrgsCommand())
+	root.AddCommand(application.newWebhooksCommand())
+	root.AddCommand(application.newAPIKeysCommand())
+	root.AddCommand(application.newAuditCommand())
+	root.AddCommand(application.newExtensionsCommand())
+	root.AddCommand(application.newAlertsCommand())
+	root.AddCommand(application.newDoctorCommand())
+	root.AddCommand(application.newConfigCommand())
+	root.AddCommand(application.newVersionCommand())
 	return root
 }
 
@@ -153,7 +203,10 @@ func (a *app) runLogin(cmd *cobra.Command, options loginOptions) error {
 	appURL := a.resolveAppURL(apiURL)
 
 	if manualAPIKey := firstNonEmpty(a.apiKey, os.Getenv("CAPYDB_API_KEY")); strings.TrimSpace(manualAPIKey) != "" {
-		client := api.NewClient(apiURL, manualAPIKey)
+		client, err := a.newAPIClient(apiURL, manualAPIKey)
+		if err != nil {
+			return err
+		}
 		viewer, err := client.GetViewerResponse(ctx)
 		if err != nil {
 			return fmt.Errorf("validate api key: %w", err)
@@ -173,37 +226,58 @@ func (a *app) runLogin(cmd *cobra.Command, options loginOptions) error {
 		return a.saveAuthAndPrint(cmd, authConfig)
 	}
 
-	anonymousClient := api.NewClient(apiURL, "")
+	authConfig, err := a.deviceLogin(ctx, cmd.ErrOrStderr(), options)
+	if err != nil {
+		return err
+	}
+	return a.saveAuthAndPrint(cmd, authConfig)
+}
+
+// deviceLogin runs the browser device-login flow and returns the minted
+// credentials. Progress (the approval URL, waiting notices) goes to the given
+// writer - callers in --output json mode pass stderr so stdout stays
+// machine-readable. The printed "Open this URL to approve:" line is a contract
+// with capydb.dev/agents.md; agents grep for it.
+func (a *app) deviceLogin(ctx context.Context, progress io.Writer, options loginOptions) (resolvedAuth, error) {
+	apiURL := a.resolveAPIURL("")
+	appURL := a.resolveAppURL(apiURL)
+
+	anonymousClient, err := a.newAPIClient(apiURL, "")
+	if err != nil {
+		return resolvedAuth{}, err
+	}
 	deviceName := resolveCLILoginDeviceName(options.deviceName)
 	expiresAt, err := resolveCLILoginExpiry(options.expiresIn)
 	if err != nil {
-		return err
+		return resolvedAuth{}, err
 	}
+	source := cliLoginSource()
 	session, err := anonymousClient.StartCLILoginSession(ctx, api.CLILoginSessionStartRequest{
 		DeviceName: deviceName,
 		ExpiresAt:  expiresAt,
-		Name:       resolveCLILoginName(options.name, deviceName),
+		Name:       resolveCLILoginName(options.name, deviceName, source),
+		Source:     source,
 	})
 	if err != nil {
-		return fmt.Errorf("start login session: %w", err)
+		return resolvedAuth{}, fmt.Errorf("start login session: %w", err)
 	}
 
 	loginURL := strings.TrimRight(appURL, "/") + "/dashboard/cli/login?session=" + url.QueryEscape(session.SessionID)
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Open this URL to authorize the CLI:\n%s\n", loginURL)
+	_, _ = fmt.Fprintf(progress, "Open this URL to approve:\n%s\n", loginURL)
 
 	if !options.noOpen {
 		if err := openURL(loginURL); err != nil {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Could not open browser automatically: %v\n", err)
+			_, _ = fmt.Fprintf(progress, "Could not open browser automatically: %v\n", err)
 		}
 	}
 
-	_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Waiting for browser authorization...")
+	_, _ = fmt.Fprintln(progress, "Waiting for browser approval (sign-up, plan, and consent happen in that tab)...")
 	status, err := waitForCLILoginSession(ctx, anonymousClient, session.SessionID, session.PollToken, session.ExpiresAt)
 	if err != nil {
-		return err
+		return resolvedAuth{}, err
 	}
 
-	authConfig := resolvedAuth{
+	return resolvedAuth{
 		APIKey:           status.PlaintextAPIKey,
 		APIURL:           apiURL,
 		AppURL:           appURL,
@@ -211,8 +285,38 @@ func (a *app) runLogin(cmd *cobra.Command, options loginOptions) error {
 		OrganizationName: status.OrganizationName,
 		OrganizationSlug: status.OrganizationSlug,
 		Persist:          true,
+	}, nil
+}
+
+// cliLoginSource detects who is driving the login so the minted key gets the
+// right provenance label: AI assistants run the CLI without an interactive
+// stdin (or set CAPYDB_AGENT=1 explicitly).
+func cliLoginSource() string {
+	if os.Getenv("CAPYDB_AGENT") == "1" || !stdinIsInteractive() {
+		return "agent"
 	}
-	return a.saveAuthAndPrint(cmd, authConfig)
+	return "cli"
+}
+
+// resolveAuthOrLogin returns explicit/saved credentials when present and
+// otherwise starts the browser device login instead of failing, so first-run
+// `capydb create`/`link` need no separate login step. Login progress goes to
+// stderr to keep stdout machine-readable.
+func (a *app) resolveAuthOrLogin(cmd *cobra.Command, fallbackAPIURL ...string) (resolvedAuth, error) {
+	authConfig, err := a.resolveAuth(false, fallbackAPIURL...)
+	if err == nil {
+		return authConfig, nil
+	}
+
+	authConfig, err = a.deviceLogin(cmd.Context(), cmd.ErrOrStderr(), loginOptions{})
+	if err != nil {
+		return resolvedAuth{}, err
+	}
+	if err := a.persistResolvedAuth(authConfig); err != nil {
+		return resolvedAuth{}, err
+	}
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Logged in to organization %s\n", firstNonEmpty(authConfig.OrganizationName, authConfig.OrganizationSlug, authConfig.OrganizationID))
+	return authConfig, nil
 }
 
 func (a *app) newLogoutCommand() *cobra.Command {
@@ -276,6 +380,21 @@ func (a *app) runWhoami(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load viewer: %w", err)
 	}
 
+	if a.jsonOutput() {
+		report := struct {
+			APIURL       string            `json:"api_url"`
+			AppURL       string            `json:"app_url"`
+			AuthSource   string            `json:"auth_source"`
+			Organization *api.Organization `json:"organization"`
+		}{
+			APIURL:       authConfig.APIURL,
+			AppURL:       authConfig.AppURL,
+			AuthSource:   firstNonEmpty(viewer.Principal.AuthSource, "api_key"),
+			Organization: viewer.Organization,
+		}
+		return printJSON(cmd.OutOrStdout(), report)
+	}
+
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "api_url: %s\n", authConfig.APIURL)
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "app_url: %s\n", authConfig.AppURL)
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "auth_source: %s\n", firstNonEmpty(viewer.Principal.AuthSource, "api_key"))
@@ -306,12 +425,15 @@ func (a *app) newStatusCommand() *cobra.Command {
 }
 
 func (a *app) newCreateCommand() *cobra.Command {
-	var clusterRef string
 	var envFileOverride string
 	var nonInteractive bool
+	var overwriteEnv bool
 	var projectName string
 	var region string
 	var slug string
+	var environment string
+	var postgresVersion string
+	var waitTimeout time.Duration
 
 	command := &cobra.Command{
 		Use:     "create",
@@ -319,93 +441,128 @@ func (a *app) newCreateCommand() *cobra.Command {
 		Short:   "Create a CapyDB project and link the current directory to it",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			detection, err := a.detectProject(envFileOverride)
-			if err != nil {
-				return err
+			// In JSON mode stdout carries exactly one JSON document (the
+			// summary or a structured error); progress narration moves to
+			// stderr so agents can pipe stdout straight into a parser.
+			progress := cmd.OutOrStdout()
+			if a.jsonOutput() {
+				progress = cmd.ErrOrStderr()
 			}
 
-			authConfig, err := a.resolveAuth(true)
-			if err != nil {
-				return err
-			}
-
-			client := api.NewClient(authConfig.APIURL, authConfig.APIKey)
-			viewer, err := client.GetViewer(ctx)
-			if err != nil {
-				return fmt.Errorf("load organization billing: %w", err)
-			}
-			if err := ensureViewerCanProvision(viewer); err != nil {
-				return err
-			}
-			clusters, err := client.ListClusters(ctx)
-			if err != nil {
-				return fmt.Errorf("list clusters: %w", err)
-			}
-			if err := a.persistResolvedAuth(authConfig); err != nil {
-				return err
-			}
-
-			cluster, err := selectCluster(clusters, clusterRef, nonInteractive)
-			if err != nil {
-				return err
-			}
-
-			request := api.CreateProjectRequest{
-				ClusterID: cluster.ID,
-				Name:      firstNonEmpty(projectName, detection.ProjectName),
-				Region:    strings.TrimSpace(region),
-				Slug:      strings.TrimSpace(slug),
-			}
-
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Creating project %s on cluster %s (%s)\n", request.Name, cluster.Name, cluster.Region)
-			createdProject, job, err := client.CreateProject(ctx, request)
-			if err != nil {
-				return fmt.Errorf("create project: %w", err)
-			}
-
-			if job.ID != "" {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Waiting for provision job %s\n", job.ID)
-				if job, err = waitForJob(ctx, client, job.ID); err != nil {
+			err := func() error {
+				detection, err := a.detectProject(envFileOverride)
+				if err != nil {
 					return err
 				}
-				if job.State != "completed" {
-					return fmt.Errorf("project provisioning ended in %s: %s", job.State, job.Error)
+
+				authConfig, err := a.resolveAuthOrLogin(cmd)
+				if err != nil {
+					return err
 				}
-			}
 
-			linkConfig := config.ProjectConfig{
-				AppPath:       detection.AppPath,
-				APIURL:        authConfig.APIURL,
-				ClusterID:     cluster.ID,
-				DatabaseLayer: detection.DatabaseLayer,
-				EnvFile:       detection.EnvFile,
-				Framework:     detection.Framework,
-				Profile:       detection.Profile,
-				ProjectID:     createdProject.ID,
-				ProjectName:   createdProject.Name,
-				ProjectSlug:   createdProject.Slug,
-			}
+				client, err := a.newAPIClient(authConfig.APIURL, authConfig.APIKey)
+				if err != nil {
+					return err
+				}
+				viewer, err := client.GetViewer(ctx)
+				if err != nil {
+					return fmt.Errorf("load organization billing: %w", err)
+				}
+				if err := ensureViewerCanProvision(viewer, authConfig.AppURL); err != nil {
+					return err
+				}
+				regions, err := client.ListRegions(ctx)
+				if err != nil {
+					return fmt.Errorf("list regions: %w", err)
+				}
+				if err := a.persistResolvedAuth(authConfig); err != nil {
+					return err
+				}
 
-			if err := a.writeProjectEnv(cmd, client, createdProject.ID, linkConfig, envFileOverride, true); err != nil {
-				return err
-			}
+				selectedRegion, err := selectRegion(regions, region, nonInteractive)
+				if err != nil {
+					return err
+				}
 
-			printLinkSummary(cmd, detection, linkConfig)
-			return nil
+				request := api.CreateProjectRequest{
+					Environment:     strings.TrimSpace(environment),
+					Name:            firstNonEmpty(projectName, detection.ProjectName),
+					PostgresVersion: strings.TrimSpace(postgresVersion),
+					Region:          selectedRegion,
+					Slug:            strings.TrimSpace(slug),
+				}
+
+				if selectedRegion != "" {
+					_, _ = fmt.Fprintf(progress, "Creating project %s in region %s\n", request.Name, selectedRegion)
+				} else {
+					_, _ = fmt.Fprintf(progress, "Creating project %s (region auto-selected)\n", request.Name)
+				}
+				createdProject, job, err := client.CreateProject(ctx, request)
+				if err != nil {
+					return fmt.Errorf("create project: %w", err)
+				}
+
+				if job.ID != "" {
+					_, _ = fmt.Fprintf(progress, "Waiting for provision job %s\n", job.ID)
+					if job, err = waitForJob(ctx, cmd.ErrOrStderr(), client, job.ID, waitTimeout); err != nil {
+						return err
+					}
+					if job.State != "completed" {
+						return fmt.Errorf("project provisioning ended in %s: %s", job.State, job.Error)
+					}
+				}
+
+				linkConfig := config.ProjectConfig{
+					AppPath:       detection.AppPath,
+					APIURL:        authConfig.APIURL,
+					Region:        selectedRegion,
+					DatabaseLayer: detection.DatabaseLayer,
+					EnvFile:       detection.EnvFile,
+					Framework:     detection.Framework,
+					Profile:       detection.Profile,
+					ProjectID:     createdProject.ID,
+					ProjectName:   createdProject.Name,
+					ProjectSlug:   createdProject.Slug,
+				}
+
+				if err := a.writeProjectEnv(cmd, client, createdProject.ID, linkConfig, envFileOverride, true, overwriteEnv); err != nil {
+					return err
+				}
+
+				if a.jsonOutput() {
+					return a.printCreateJSONSummary(cmd, detection, createdProject, job)
+				}
+				printLinkSummary(cmd, detection, linkConfig)
+				return nil
+			}()
+			if err != nil && a.jsonOutput() {
+				// Best effort: the structured error is for agents; the real
+				// error still propagates for the exit code and stderr.
+				_ = printJSON(cmd.OutOrStdout(), createErrorPayload(err))
+			}
+			return err
 		},
 	}
 
-	command.Flags().StringVar(&clusterRef, "cluster", "", "Cluster id or name")
 	command.Flags().StringVar(&envFileOverride, "env-file", "", "Target env file")
-	command.Flags().BoolVar(&nonInteractive, "yes", false, "Use the first cluster when no cluster is specified")
+	command.Flags().BoolVar(&overwriteEnv, "overwrite-env", false, "Overwrite existing env values (e.g. a previous provider's DATABASE_URL) without prompting")
+	command.Flags().BoolVar(&nonInteractive, "non-interactive", false, "Let the server pick a region when none is specified")
+	// Deprecated spelling kept as a hidden alias: --yes read as a destructive
+	// confirm, which `create` is not - it only opts out of the region prompt.
+	command.Flags().BoolVar(&nonInteractive, "yes", false, "Let the server pick a region when none is specified")
+	_ = command.Flags().MarkHidden("yes")
 	command.Flags().StringVar(&projectName, "name", "", "Project name")
-	command.Flags().StringVar(&region, "region", "", "Region override")
+	command.Flags().StringVar(&region, "region", "", "Region for project placement (server picks one when omitted)")
 	command.Flags().StringVar(&slug, "slug", "", "Project slug override")
+	command.Flags().StringVar(&environment, "environment", "", "Environment label: production (default) or non_production (unlocks overwrite-restore)")
+	command.Flags().StringVar(&postgresVersion, "postgres-version", "", "Postgres major version: 16, 17, or 18 (server default when omitted)")
+	command.Flags().DurationVar(&waitTimeout, "wait-timeout", defaultWaitTimeout, "Maximum time to wait for the provision job")
 	return command
 }
 
 func (a *app) newLinkCommand() *cobra.Command {
 	var envFileOverride string
+	var overwriteEnv bool
 	var projectRef string
 
 	command := &cobra.Command{
@@ -419,12 +576,15 @@ func (a *app) newLinkCommand() *cobra.Command {
 				return err
 			}
 
-			authConfig, err := a.resolveAuth(true)
+			authConfig, err := a.resolveAuthOrLogin(cmd)
 			if err != nil {
 				return err
 			}
 
-			client := api.NewClient(authConfig.APIURL, authConfig.APIKey)
+			client, err := a.newAPIClient(authConfig.APIURL, authConfig.APIKey)
+			if err != nil {
+				return err
+			}
 			resolvedProject, err := a.resolveProject(ctx, client, projectRef)
 			if err != nil {
 				return err
@@ -433,7 +593,7 @@ func (a *app) newLinkCommand() *cobra.Command {
 			linkConfig := config.ProjectConfig{
 				AppPath:       detection.AppPath,
 				APIURL:        authConfig.APIURL,
-				ClusterID:     resolvedProject.ClusterID,
+				Region:        resolvedProject.Region,
 				DatabaseLayer: detection.DatabaseLayer,
 				EnvFile:       detection.EnvFile,
 				Framework:     detection.Framework,
@@ -443,7 +603,7 @@ func (a *app) newLinkCommand() *cobra.Command {
 				ProjectSlug:   resolvedProject.Slug,
 			}
 
-			if err := a.writeProjectEnv(cmd, client, resolvedProject.ID, linkConfig, envFileOverride, true); err != nil {
+			if err := a.writeProjectEnv(cmd, client, resolvedProject.ID, linkConfig, envFileOverride, true, overwriteEnv); err != nil {
 				return err
 			}
 			if err := a.persistResolvedAuth(authConfig); err != nil {
@@ -456,6 +616,7 @@ func (a *app) newLinkCommand() *cobra.Command {
 	}
 
 	command.Flags().StringVar(&envFileOverride, "env-file", "", "Target env file")
+	command.Flags().BoolVar(&overwriteEnv, "overwrite-env", false, "Overwrite existing env values (e.g. a previous provider's DATABASE_URL) without prompting")
 	command.Flags().StringVar(&projectRef, "project", "", "Project id, slug, or name")
 	return command
 }
@@ -500,13 +661,16 @@ func (a *app) newEnvCommand() *cobra.Command {
 				return err
 			}
 
-			authConfig, err := a.resolveAuth(true, linkConfig.APIURL)
+			authConfig, err := a.resolveAuthOrLogin(cmd, linkConfig.APIURL)
 			if err != nil {
 				return err
 			}
 
-			client := api.NewClient(authConfig.APIURL, authConfig.APIKey)
-			if err := a.writeProjectEnv(cmd, client, linkConfig.ProjectID, linkConfig, envFileOverride, false); err != nil {
+			client, err := a.newAPIClient(authConfig.APIURL, authConfig.APIKey)
+			if err != nil {
+				return err
+			}
+			if err := a.writeProjectEnv(cmd, client, linkConfig.ProjectID, linkConfig, envFileOverride, false, false); err != nil {
 				return err
 			}
 			if err := a.persistResolvedAuth(authConfig); err != nil {
@@ -555,19 +719,25 @@ func (a *app) resolveAuth(prompt bool, fallbackAPIURL ...string) (resolvedAuth, 
 	}
 
 	userConfig, err := config.LoadUserConfig()
-	if err == nil && strings.TrimSpace(userConfig.APIKey) != "" {
-		return resolvedAuth{
-			APIKey:           strings.TrimSpace(userConfig.APIKey),
-			APIURL:           a.resolveAPIURL(firstNonEmpty(apiURL, userConfig.APIURL)),
-			AppURL:           a.resolveAppURL(firstNonEmpty(appURL, userConfig.AppURL)),
-			OrganizationID:   userConfig.OrganizationID,
-			OrganizationName: userConfig.OrganizationName,
-			OrganizationSlug: userConfig.OrganizationSlug,
-		}, nil
+	if err == nil {
+		if orgID, entry, ok := userConfig.Active(); ok && strings.TrimSpace(entry.APIKey) != "" {
+			organizationID := orgID
+			if organizationID == config.DefaultOrgKey {
+				organizationID = ""
+			}
+			return resolvedAuth{
+				APIKey:           strings.TrimSpace(entry.APIKey),
+				APIURL:           a.resolveAPIURL(firstNonEmpty(apiURL, entry.APIURL)),
+				AppURL:           a.resolveAppURL(firstNonEmpty(appURL, entry.AppURL)),
+				OrganizationID:   organizationID,
+				OrganizationName: entry.Name,
+				OrganizationSlug: entry.Slug,
+			}, nil
+		}
 	}
 
 	if !prompt || !stdinIsInteractive() {
-		return resolvedAuth{}, fmt.Errorf("no api key available; pass --api-key, set CAPYDB_API_KEY, or run `capydb login`")
+		return resolvedAuth{}, authErrorf("no api key available; pass --api-key, set CAPYDB_API_KEY, or run `capydb login`")
 	}
 
 	value, err := promptLine("CapyDB API key")
@@ -597,25 +767,33 @@ func (a *app) resolveAPIURL(fallback string) string {
 	}
 
 	userConfig, err := config.LoadUserConfig()
-	if err == nil && strings.TrimSpace(userConfig.APIURL) != "" {
-		return strings.TrimRight(strings.TrimSpace(userConfig.APIURL), "/")
+	if err == nil {
+		if _, entry, ok := userConfig.Active(); ok && strings.TrimSpace(entry.APIURL) != "" {
+			return strings.TrimRight(strings.TrimSpace(entry.APIURL), "/")
+		}
 	}
 	return config.DefaultAPIURL()
 }
 
+// persistResolvedAuth upserts the credentials into the per-organization user
+// config and makes that organization active.
 func (a *app) persistResolvedAuth(authConfig resolvedAuth) error {
 	if !authConfig.Persist {
 		return nil
 	}
 
-	return config.SaveUserConfig(config.UserConfig{
-		APIKey:           authConfig.APIKey,
-		APIURL:           authConfig.APIURL,
-		AppURL:           authConfig.AppURL,
-		OrganizationID:   authConfig.OrganizationID,
-		OrganizationName: authConfig.OrganizationName,
-		OrganizationSlug: authConfig.OrganizationSlug,
+	userConfig, err := config.LoadUserConfig()
+	if err != nil {
+		return err
+	}
+	userConfig.Upsert(authConfig.OrganizationID, config.OrganizationConfig{
+		APIKey: authConfig.APIKey,
+		APIURL: authConfig.APIURL,
+		AppURL: authConfig.AppURL,
+		Name:   authConfig.OrganizationName,
+		Slug:   authConfig.OrganizationSlug,
 	})
+	return config.SaveUserConfig(userConfig)
 }
 
 func (a *app) saveAuthAndPrint(cmd *cobra.Command, authConfig resolvedAuth) error {
@@ -636,7 +814,7 @@ func (a *app) saveAuthAndPrint(cmd *cobra.Command, authConfig resolvedAuth) erro
 	return nil
 }
 
-func (a *app) writeProjectEnv(cmd *cobra.Command, client *api.Client, projectID string, linkConfig config.ProjectConfig, envFileOverride string, confirmOverwrite bool) error {
+func (a *app) writeProjectEnv(cmd *cobra.Command, client *api.Client, projectID string, linkConfig config.ProjectConfig, envFileOverride string, confirmOverwrite, forceOverwrite bool) error {
 	ctx := cmd.Context()
 	projectDetails, _, err := client.GetProject(ctx, projectID)
 	if err != nil {
@@ -656,15 +834,18 @@ func (a *app) writeProjectEnv(cmd *cobra.Command, client *api.Client, projectID 
 	plan := project.BuildEnvPlan(detection, connections.DirectURL, connections.PooledURL)
 	envAbsPath := envTargetPath(a.cwd, linkConfig.AppPath, envPath)
 
+	// forceOverwrite (--overwrite-env) skips the interactive conflict prompt:
+	// a nil resolver overwrites silently, which is what migration/automation
+	// flows want when repointing DATABASE_URL from another provider.
 	var resolver envfile.ConflictResolver
-	if confirmOverwrite {
+	if confirmOverwrite && !forceOverwrite {
 		resolver = a.envOverwriteResolver(cmd)
 	}
 	if err := envfile.UpsertWithResolver(envAbsPath, plan.Vars, resolver); err != nil {
 		return err
 	}
 
-	linkConfig.ClusterID = firstNonEmpty(linkConfig.ClusterID, projectDetails.ClusterID)
+	linkConfig.Region = firstNonEmpty(linkConfig.Region, projectDetails.Region)
 	linkConfig.DatabaseURLVar = plan.DatabaseURLVar
 	linkConfig.DirectURLVar = plan.DirectURLVar
 	linkConfig.PooledURLVar = plan.PooledURLVar
@@ -725,7 +906,7 @@ func (a *app) envOverwriteResolver(cmd *cobra.Command) envfile.ConflictResolver 
 		case "y", "yes":
 			return true, nil
 		default:
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Keeping existing %s.\n", key)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Keeping existing %s.\n", key)
 			return false, nil
 		}
 	}
@@ -742,14 +923,18 @@ func resolveCLILoginDeviceName(value string) string {
 	return "local-" + runtime.GOOS
 }
 
-func resolveCLILoginName(value, deviceName string) string {
+func resolveCLILoginName(value, deviceName, source string) string {
 	if trimmed := strings.TrimSpace(value); trimmed != "" {
 		return trimmed
 	}
-	if strings.TrimSpace(deviceName) == "" {
-		return "CapyDB CLI"
+	prefix := "CLI"
+	if source == "agent" {
+		prefix = "Agent"
 	}
-	return "CLI on " + strings.TrimSpace(deviceName)
+	if strings.TrimSpace(deviceName) == "" {
+		return "CapyDB " + prefix
+	}
+	return prefix + " on " + strings.TrimSpace(deviceName)
 }
 
 func resolveCLILoginExpiry(raw string) (*time.Time, error) {
@@ -805,23 +990,38 @@ func parseCLILoginDuration(raw string) (time.Duration, error) {
 	}
 }
 
+// waitForCLILoginSession polls the login session until it is authorized.
+// 404/410 (session unknown or gone) and 401 (poll token rejected) fail fast -
+// the session will never recover, so spinning until expiry only hides the
+// problem. Transient network errors are tolerated up to a small cap.
 func waitForCLILoginSession(ctx context.Context, client *api.Client, sessionID, pollToken string, expiresAt time.Time) (api.CLILoginSessionStatus, error) {
+	const maxConsecutiveNetworkFailures = 5
+
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
+	consecutiveNetworkFailures := 0
 	for {
 		status, err := client.PollCLILoginSession(ctx, sessionID, pollToken)
 		if err == nil {
+			consecutiveNetworkFailures = 0
 			if status.State == "completed" && strings.TrimSpace(status.PlaintextAPIKey) != "" {
 				return status, nil
 			}
 		} else {
-			var apiErr *api.APIError
-			if errors.As(err, &apiErr) && apiErr.StatusCode == 410 {
-				return api.CLILoginSessionStatus{}, fmt.Errorf("login session expired; run `capydb login` again")
+			if apiErr, ok := errors.AsType[*api.APIError](err); ok {
+				switch apiErr.StatusCode {
+				case 404, 410:
+					return api.CLILoginSessionStatus{}, fmt.Errorf("login session expired or not found; run `capydb login` again")
+				case 401:
+					return api.CLILoginSessionStatus{}, fmt.Errorf("login session poll was rejected (unauthorized); run `capydb login` again")
+				default:
+					return api.CLILoginSessionStatus{}, fmt.Errorf("poll login session: %w", err)
+				}
 			}
-			if errors.As(err, &apiErr) && apiErr.StatusCode != 404 && apiErr.StatusCode != 401 {
-				return api.CLILoginSessionStatus{}, fmt.Errorf("poll login session: %w", err)
+			consecutiveNetworkFailures++
+			if consecutiveNetworkFailures >= maxConsecutiveNetworkFailures {
+				return api.CLILoginSessionStatus{}, fmt.Errorf("poll login session: giving up after %d consecutive failures: %w", consecutiveNetworkFailures, err)
 			}
 		}
 
@@ -863,6 +1063,71 @@ func projectDetectionFromConfig(cfg config.ProjectConfig) project.Detection {
 	}
 }
 
+// printCreateJSONSummary emits the single machine-readable stdout document
+// for `capydb create --output json`: identifiers, the env file written, and
+// the env var NAMES - values stay in the file and must not reach transcripts.
+func (a *app) printCreateJSONSummary(cmd *cobra.Command, detection project.Detection, createdProject api.Project, job api.Job) error {
+	linkConfig, err := config.LoadProjectConfig(a.cwd)
+	if err != nil {
+		return fmt.Errorf("reload project link for summary: %w", err)
+	}
+
+	envVars := make([]string, 0, 3)
+	for _, name := range []string{linkConfig.DatabaseURLVar, linkConfig.DirectURLVar, linkConfig.PooledURLVar} {
+		if strings.TrimSpace(name) != "" {
+			envVars = append(envVars, name)
+		}
+	}
+
+	return printJSON(cmd.OutOrStdout(), struct {
+		Region      string   `json:"region,omitempty"`
+		EnvFile     string   `json:"env_file"`
+		EnvVars     []string `json:"env_vars"`
+		Framework   string   `json:"framework,omitempty"`
+		JobID       string   `json:"job_id,omitempty"`
+		JobState    string   `json:"job_state,omitempty"`
+		ProjectID   string   `json:"project_id"`
+		ProjectName string   `json:"project_name"`
+		ProjectSlug string   `json:"project_slug,omitempty"`
+	}{
+		Region:      linkConfig.Region,
+		EnvFile:     firstNonEmpty(filepath.Join(detection.AppPath, linkConfig.EnvFile), linkConfig.EnvFile),
+		EnvVars:     jsonList(envVars),
+		Framework:   firstNonEmpty(detection.Framework, detection.Profile),
+		JobID:       job.ID,
+		JobState:    job.State,
+		ProjectID:   createdProject.ID,
+		ProjectName: createdProject.Name,
+		ProjectSlug: createdProject.Slug,
+	})
+}
+
+// createErrorPayload maps a create failure onto the structured error contract
+// documented at capydb.dev/agents.md: a stable `error` code plus, when there
+// is a concrete next step, an `action`/`url` pair the agent can relay.
+func createErrorPayload(err error) map[string]string {
+	payload := map[string]string{
+		"error":   "create_failed",
+		"message": err.Error(),
+	}
+
+	var billingErr *billingInactiveError
+	if errors.As(err, &billingErr) {
+		payload["error"] = "billing_inactive"
+		payload["action"] = "open_url"
+		payload["url"] = billingErr.url
+		return payload
+	}
+
+	var coded *exitcode.Error
+	if errors.As(err, &coded) && coded.Code == exitcode.AuthError {
+		payload["error"] = "auth_required"
+		payload["action"] = "run_command"
+		payload["command"] = "capydb login"
+	}
+	return payload
+}
+
 func printLinkSummary(cmd *cobra.Command, detection project.Detection, linkConfig config.ProjectConfig) {
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Linked %s to project %s\n", firstNonEmpty(detection.ProjectName, filepath.Base(linkConfig.AppPath), filepath.Base(linkConfig.ProjectName)), linkConfig.ProjectID)
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "App path: %s\n", firstNonEmpty(detection.AppPath, "."))
@@ -882,7 +1147,18 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func ensureViewerCanProvision(viewer api.Viewer) error {
+// billingInactiveError carries the billing page URL so JSON consumers (AI
+// agents) get a concrete next step instead of just prose.
+type billingInactiveError struct {
+	message string
+	url     string
+}
+
+func (e *billingInactiveError) Error() string {
+	return e.message
+}
+
+func ensureViewerCanProvision(viewer api.Viewer, appURL string) error {
 	if viewer.Organization == nil {
 		return fmt.Errorf("select an organization before creating a project")
 	}
@@ -891,11 +1167,16 @@ func ensureViewerCanProvision(viewer api.Viewer) error {
 		return nil
 	}
 
-	return fmt.Errorf(
-		"organization billing is %s on plan %s; open the dashboard billing page before creating a project",
-		viewer.Organization.BillingStatus,
-		viewer.Organization.BillingPlan,
-	)
+	billingURL := strings.TrimRight(firstNonEmpty(appURL, config.DefaultAppURL("")), "/") + "/dashboard/settings?tab=billing"
+	return &billingInactiveError{
+		message: fmt.Sprintf(
+			"organization billing is %s on plan %s; pick a plan (1 month free) at %s before creating a project",
+			viewer.Organization.BillingStatus,
+			viewer.Organization.BillingPlan,
+			billingURL,
+		),
+		url: billingURL,
+	}
 }
 
 func billingAllowsProvisioning(plan, status string, periodEnd *time.Time) bool {
@@ -937,39 +1218,50 @@ func stdinIsInteractive() bool {
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
-func selectCluster(clusters []api.Cluster, ref string, nonInteractive bool) (api.Cluster, error) {
-	if len(clusters) == 0 {
-		return api.Cluster{}, fmt.Errorf("no clusters available for this api key")
-	}
-
+// selectRegion resolves the placement region for a new project. An explicit
+// ref is validated against the available regions; when no ref is given the
+// server is allowed to pick (empty string) unless an interactive choice is
+// possible and wanted.
+func selectRegion(regions []string, ref string, nonInteractive bool) (string, error) {
 	if trimmed := strings.TrimSpace(ref); trimmed != "" {
-		for _, cluster := range clusters {
-			if cluster.ID == trimmed || strings.EqualFold(cluster.Name, trimmed) {
-				return cluster, nil
+		if len(regions) == 0 {
+			return trimmed, nil
+		}
+		for _, region := range regions {
+			if strings.EqualFold(region, trimmed) {
+				return region, nil
 			}
 		}
-		return api.Cluster{}, fmt.Errorf("cluster %q not found", trimmed)
+		return "", fmt.Errorf("region %q not available", trimmed)
 	}
 
-	if len(clusters) == 1 || nonInteractive {
-		return clusters[0], nil
+	// No region requested: let the server choose when we cannot or should not
+	// prompt for one.
+	if nonInteractive || len(regions) == 0 || !stdinIsInteractive() {
+		return "", nil
+	}
+	if len(regions) == 1 {
+		return regions[0], nil
 	}
 
-	fmt.Println("Select a cluster:")
-	for index, cluster := range clusters {
-		fmt.Printf("  %d. %s (%s, %s)\n", index+1, cluster.Name, cluster.Region, cluster.ID)
+	fmt.Println("Select a region:")
+	for index, region := range regions {
+		fmt.Printf("  %d. %s\n", index+1, region)
 	}
 
-	value, err := promptLine("Cluster number")
+	value, err := promptLine("Region number (leave blank to let the server choose)")
 	if err != nil {
-		return api.Cluster{}, err
+		return "", err
+	}
+	if strings.TrimSpace(value) == "" {
+		return "", nil
 	}
 	selection, err := strconv.Atoi(value)
-	if err != nil || selection < 1 || selection > len(clusters) {
-		return api.Cluster{}, fmt.Errorf("invalid cluster selection")
+	if err != nil || selection < 1 || selection > len(regions) {
+		return "", fmt.Errorf("invalid region selection")
 	}
 
-	return clusters[selection-1], nil
+	return regions[selection-1], nil
 }
 
 func selectAppCandidate(candidates []project.Detection) (project.Detection, error) {
@@ -1001,25 +1293,120 @@ func selectAppCandidate(candidates []project.Detection) (project.Detection, erro
 	return candidates[selection-1], nil
 }
 
-func waitForJob(ctx context.Context, client *api.Client, jobID string) (api.Job, error) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+// writerIsTerminal reports whether the writer is an interactive terminal, so
+// progress output can use carriage-return rewrites instead of plain lines.
+func writerIsTerminal(w io.Writer) bool {
+	file, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+// defaultWaitTimeout bounds --wait job polling unless --wait-timeout overrides it.
+const defaultWaitTimeout = 30 * time.Minute
+
+// waitForJob polls a job until it reaches a terminal state or the overall
+// timeout elapses (a zero/negative timeout falls back to defaultWaitTimeout).
+// Polling backs off exponentially from 2s to 10s, tolerates up to 5
+// consecutive poll errors (network blips), fails immediately on 401/403
+// (auth failures never resolve themselves), and writes a lightweight progress
+// indicator to errOut: a single \r-rewritten line on a TTY, plain periodic
+// lines otherwise.
+func waitForJob(ctx context.Context, errOut io.Writer, client *api.Client, jobID string, timeout time.Duration) (api.Job, error) {
+	const (
+		initialInterval        = 2 * time.Second
+		maxInterval            = 10 * time.Second
+		maxConsecutiveFailures = 5
+	)
+
+	if timeout <= 0 {
+		timeout = defaultWaitTimeout
+	}
+	deadline := time.Now().Add(timeout)
+
+	interval := initialInterval
+	start := time.Now()
+	isTTY := writerIsTerminal(errOut)
+	attempt := 0
+	consecutiveFailures := 0
+	lastLineLen := 0
+	progressActive := false
+
+	finishProgress := func() {
+		if isTTY && progressActive {
+			_, _ = fmt.Fprintln(errOut)
+			progressActive = false
+		}
+	}
 
 	for {
+		attempt++
 		job, err := client.GetJob(ctx, jobID)
 		if err != nil {
-			return api.Job{}, fmt.Errorf("poll job %s: %w", jobID, err)
+			if apiErr, ok := errors.AsType[*api.APIError](err); ok && (apiErr.StatusCode == 401 || apiErr.StatusCode == 403) {
+				finishProgress()
+				return api.Job{}, fmt.Errorf("poll job %s: %w", jobID, err)
+			}
+			consecutiveFailures++
+			if consecutiveFailures >= maxConsecutiveFailures {
+				finishProgress()
+				return api.Job{}, fmt.Errorf("poll job %s: giving up after %d consecutive failures: %w", jobID, consecutiveFailures, err)
+			}
+		} else {
+			consecutiveFailures = 0
+			if jobDone(job) {
+				finishProgress()
+				return job, nil
+			}
+
+			line := fmt.Sprintf(
+				"waiting for job %s (%s) - %s, attempt %d, elapsed %s",
+				jobID,
+				firstNonEmpty(job.Type, "unknown"),
+				firstNonEmpty(job.State, "unknown"),
+				attempt,
+				time.Since(start).Truncate(time.Second),
+			)
+			if isTTY {
+				padding := ""
+				if lastLineLen > len(line) {
+					padding = strings.Repeat(" ", lastLineLen-len(line))
+				}
+				_, _ = fmt.Fprintf(errOut, "\r%s%s", line, padding)
+				lastLineLen = len(line)
+				progressActive = true
+			} else {
+				_, _ = fmt.Fprintln(errOut, line)
+			}
 		}
 
-		switch job.State {
-		case "completed", "failed":
-			return job, nil
+		if time.Now().After(deadline) {
+			finishProgress()
+			return api.Job{}, exitcode.Errorf(
+				exitcode.Timeout,
+				"timed out waiting for job %s after %s; check `capydb jobs get --job-id %s` later or raise --wait-timeout",
+				jobID,
+				timeout,
+				jobID,
+			)
 		}
 
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
+			finishProgress()
 			return api.Job{}, ctx.Err()
-		case <-ticker.C:
+		case <-timer.C:
+		}
+		interval *= 2
+		if interval > maxInterval {
+			interval = maxInterval
 		}
 	}
 }

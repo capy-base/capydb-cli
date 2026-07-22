@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 go build -trimpath \
     -o capydb \
     ./cmd/capydb
 
-FROM alpine:3.23
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates tzdata
 RUN adduser -D -s /bin/sh capydb

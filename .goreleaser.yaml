@@ -9,6 +9,11 @@ before:
   hooks:
     - go mod verify
     - go test ./...
+    # Generate shell completions so archives and the Homebrew cask can ship them.
+    - mkdir -p completions
+    - sh -c 'go run ./cmd/capydb completion bash > completions/capydb.bash'
+    - sh -c 'go run ./cmd/capydb completion zsh > completions/capydb.zsh'
+    - sh -c 'go run ./cmd/capydb completion fish > completions/capydb.fish'
 
 builds:
   - id: capydb
@@ -52,6 +57,7 @@ archives:
           - zip
     files:
       - README*
+      - completions/*
 
 checksum:
   name_template: checksums.txt
@@ -89,6 +95,39 @@ changelog:
       - Merge pull request
       - Merge branch
       - go mod tidy
+
+# Publishes a cask to github.com/capy-base/homebrew-tap so users can
+# `brew tap capy-base/tap && brew install --cask capydb` (or plain
+# `brew install capy-base/tap/capydb`). Casks are GoReleaser's current
+# mechanism for prebuilt binaries (the old `brews` formula section is
+# deprecated). The tap repo must exist and the release token needs push
+# access to it. Skipped on snapshot builds.
+homebrew_casks:
+  - name: capydb
+    repository:
+      owner: capy-base
+      name: homebrew-tap
+      branch: main
+    directory: Casks
+    homepage: https://capydb.dev
+    description: "CapyDB CLI - simple Postgres hosting"
+    license: MIT
+    commit_author:
+      name: capydb-release-bot
+      email: releases@capydb.dev
+    # Shell completions shipped inside the release archives (see archives.files).
+    completions:
+      bash: completions/capydb.bash
+      zsh: completions/capydb.zsh
+      fish: completions/capydb.fish
+    # Unquarantine the binary on install: release artifacts are not notarized.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/capydb"]
+          end
+    skip_upload: "{{ .IsSnapshot }}"
 
 release:
   github:

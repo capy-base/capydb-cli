@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/capy-base/capydb/cli/internal/api"
 	"github.com/capy-base/capydb/cli/internal/config"
 )
 
@@ -37,35 +39,33 @@ func TestCreateCommandWritesEnvAndProjectConfig(t *testing.T) {
 					"scopes":          []string{"*"},
 				},
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/clusters":
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/regions":
 			writeJSON(t, w, map[string]any{
-				"clusters": []map[string]any{{
-					"id":     "cluster_123",
-					"name":   "main",
-					"region": "swedencentral",
-				}},
+				"regions": []string{"swedencentral"},
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects":
 			writeJSON(t, w, map[string]any{
 				"job": map[string]any{},
 				"project": map[string]any{
-					"id":              projectID,
-					"organization_id": "org_123",
-					"cluster_id":      "cluster_123",
-					"name":            "test-app",
-					"slug":            "test-app",
-					"state":           "ready",
+					"id":                  projectID,
+					"organization_id":     "org_123",
+					"primary_instance_id": "inst_123",
+					"region":              "swedencentral",
+					"name":                "test-app",
+					"slug":                "test-app",
+					"state":               "ready",
 				},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/"+projectID:
 			writeJSON(t, w, map[string]any{
 				"project": map[string]any{
-					"id":              projectID,
-					"organization_id": "org_123",
-					"cluster_id":      "cluster_123",
-					"name":            "test-app",
-					"slug":            "test-app",
-					"state":           "ready",
+					"id":                  projectID,
+					"organization_id":     "org_123",
+					"primary_instance_id": "inst_123",
+					"region":              "swedencentral",
+					"name":                "test-app",
+					"slug":                "test-app",
+					"state":               "ready",
 				},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/"+projectID+"/connections":
@@ -157,7 +157,7 @@ func TestEnvPullRefreshesExistingEnvFile(t *testing.T) {
 				"project": map[string]any{
 					"id":              projectID,
 					"organization_id": "org_456",
-					"cluster_id":      "cluster_456",
+					"region":          "swedencentral",
 					"name":            "app",
 					"slug":            "app",
 					"state":           "ready",
@@ -334,7 +334,7 @@ func TestPreviewCreateResolvesProjectByName(t *testing.T) {
 				"projects": []map[string]any{{
 					"id":              "project_789",
 					"organization_id": "org_789",
-					"cluster_id":      "cluster_789",
+					"region":          "swedencentral",
 					"name":            "test-app",
 					"slug":            "test-app",
 					"state":           "ready",
@@ -345,7 +345,7 @@ func TestPreviewCreateResolvesProjectByName(t *testing.T) {
 				"job": map[string]any{
 					"id":    "job_preview_1",
 					"state": "pending",
-					"type":  "preview.create",
+					"type":  "branch.create",
 				},
 				"preview": map[string]any{
 					"id":             "prv_123",
@@ -414,7 +414,7 @@ func TestBackupsListUsesLinkedProject(t *testing.T) {
 				"project": map[string]any{
 					"id":              "project_321",
 					"organization_id": "org_321",
-					"cluster_id":      "cluster_321",
+					"region":          "swedencentral",
 					"name":            "linked-app",
 					"slug":            "linked-app",
 					"state":           "ready",
@@ -515,9 +515,7 @@ func TestStudioPageCanOpenProjectStudio(t *testing.T) {
 
 func TestLoginBrowserFlowSavesUserConfig(t *testing.T) {
 	t.Setenv("CI", "true")
-
-	configHome := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", configHome)
+	isolateUserConfig(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -542,8 +540,8 @@ func TestLoginBrowserFlowSavesUserConfig(t *testing.T) {
 				"state":      "pending",
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/cli/login/sessions/cli_123":
-			if got := r.URL.Query().Get("poll_token"); got != "poll_123" {
-				t.Fatalf("unexpected poll token: %q", got)
+			if got := r.Header.Get("X-CapyDB-Poll-Token"); got != "poll_123" {
+				t.Fatalf("unexpected poll token header: %q", got)
 			}
 			writeJSON(t, w, map[string]any{
 				"authorized_at":     "2026-04-23T12:21:00Z",
@@ -585,12 +583,29 @@ func TestLoginBrowserFlowSavesUserConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load user config: %v", err)
 	}
-	if userConfig.APIKey != "capy_live_123" {
-		t.Fatalf("unexpected api key: %s", userConfig.APIKey)
+	orgID, entry, ok := userConfig.Active()
+	if !ok {
+		t.Fatalf("expected an active organization in the saved config: %#v", userConfig)
 	}
-	if userConfig.OrganizationID != "org_123" {
-		t.Fatalf("unexpected organization id: %s", userConfig.OrganizationID)
+	if entry.APIKey != "capy_live_123" {
+		t.Fatalf("unexpected api key: %s", entry.APIKey)
 	}
+	if orgID != "org_123" {
+		t.Fatalf("unexpected organization id: %s", orgID)
+	}
+	if entry.Slug != "test-org" {
+		t.Fatalf("unexpected organization slug: %s", entry.Slug)
+	}
+}
+
+// isolateUserConfig redirects os.UserConfigDir into a temp directory so tests
+// never read or clobber the developer's real CLI config. HOME covers macOS
+// (~/Library/Application Support) and XDG_CONFIG_HOME covers Linux.
+func isolateUserConfig(t *testing.T) {
+	t.Helper()
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempHome, ".config"))
 }
 
 func TestLinkCommandDetectsNestedAppAndResolvesProjectByName(t *testing.T) {
@@ -608,7 +623,7 @@ func TestLinkCommandDetectsNestedAppAndResolvesProjectByName(t *testing.T) {
 				"projects": []map[string]any{{
 					"id":              projectID,
 					"organization_id": "org_123",
-					"cluster_id":      "cluster_123",
+					"region":          "swedencentral",
 					"name":            "web-app",
 					"slug":            "web-app",
 					"state":           "ready",
@@ -619,7 +634,7 @@ func TestLinkCommandDetectsNestedAppAndResolvesProjectByName(t *testing.T) {
 				"project": map[string]any{
 					"id":              projectID,
 					"organization_id": "org_123",
-					"cluster_id":      "cluster_123",
+					"region":          "swedencentral",
 					"name":            "web-app",
 					"slug":            "web-app",
 					"state":           "ready",
@@ -695,6 +710,55 @@ func TestLinkCommandDetectsNestedAppAndResolvesProjectByName(t *testing.T) {
 	}
 }
 
+func TestLoginPollFailsFastWhenSessionNotFound(t *testing.T) {
+	t.Setenv("CI", "true")
+	isolateUserConfig(t)
+
+	pollCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/cli/login/sessions":
+			writeJSON(t, w, map[string]any{
+				"expires_at": time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339),
+				"poll_token": "poll_404",
+				"session_id": "cli_404",
+				"state":      "pending",
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cli/login/sessions/cli_404":
+			pollCalls++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"cli login session not found"}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	application := &app{cwd: t.TempDir()}
+	command := newRootCommand(application, "test")
+	output := new(bytes.Buffer)
+	command.SetOut(output)
+	command.SetErr(output)
+	command.SetArgs([]string{
+		"login",
+		"--api-url", server.URL,
+		"--app-url", "https://capydb.dev",
+		"--no-open",
+	})
+
+	err := command.Execute()
+	if err == nil {
+		t.Fatalf("expected login to fail fast on 404")
+	}
+	if !strings.Contains(err.Error(), "login session expired or not found; run `capydb login` again") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pollCalls != 1 {
+		t.Fatalf("poll calls = %d, want 1 (must fail on the first 404 instead of spinning)", pollCalls)
+	}
+}
+
 func TestParseCLILoginDuration(t *testing.T) {
 	tests := []struct {
 		input   string
@@ -730,5 +794,38 @@ func writeJSON(t *testing.T, w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		t.Fatalf("encode json: %v", err)
+	}
+}
+
+func TestCreateErrorPayloadMapsBillingAndAuthFailures(t *testing.T) {
+	billingErr := ensureViewerCanProvision(api.Viewer{Organization: &api.Organization{BillingPlan: "none", BillingStatus: "inactive"}}, "https://capydb.dev")
+	payload := createErrorPayload(billingErr)
+	if payload["error"] != "billing_inactive" {
+		t.Fatalf("error = %q, want billing_inactive", payload["error"])
+	}
+	if payload["action"] != "open_url" || payload["url"] != "https://capydb.dev/dashboard/settings?tab=billing" {
+		t.Fatalf("payload = %v, want open_url action with billing url", payload)
+	}
+
+	payload = createErrorPayload(authErrorf("no api key available"))
+	if payload["error"] != "auth_required" || payload["command"] != "capydb login" {
+		t.Fatalf("payload = %v, want auth_required with capydb login command", payload)
+	}
+
+	payload = createErrorPayload(errors.New("boom"))
+	if payload["error"] != "create_failed" || payload["message"] != "boom" {
+		t.Fatalf("payload = %v, want create_failed passthrough", payload)
+	}
+}
+
+func TestResolveCLILoginNameLabelsAgentSessions(t *testing.T) {
+	if got := resolveCLILoginName("", "laptop", "agent"); got != "Agent on laptop" {
+		t.Fatalf("agent name = %q, want %q", got, "Agent on laptop")
+	}
+	if got := resolveCLILoginName("", "laptop", "cli"); got != "CLI on laptop" {
+		t.Fatalf("cli name = %q, want %q", got, "CLI on laptop")
+	}
+	if got := resolveCLILoginName("custom", "laptop", "agent"); got != "custom" {
+		t.Fatalf("explicit name = %q, want custom", got)
 	}
 }

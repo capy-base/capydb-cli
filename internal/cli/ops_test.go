@@ -99,7 +99,7 @@ func TestPreviewExtendCallsEndpoint(t *testing.T) {
 	}
 
 	text := output.String()
-	if !strings.Contains(text, "Extended preview qa-db (prv_extend) by 24h") {
+	if !strings.Contains(text, "Set preview qa-db (prv_extend) TTL to 24h from now") {
 		t.Fatalf("unexpected output:\n%s", text)
 	}
 	if !strings.Contains(text, "ttl_expires_at: 2026-06-01T12:00:00Z") {
@@ -125,5 +125,281 @@ func TestPreviewExtendRejectsOutOfRangeTTL(t *testing.T) {
 
 	if err := command.Execute(); err == nil {
 		t.Fatalf("expected error for out-of-range ttl-hours")
+	}
+}
+
+// newImportGateServer serves the minimal API surface the import/rotate
+// commands touch, records whether any mutating endpoint was hit, and captures
+// the JSON body it received.
+func newImportGateServer(t *testing.T, mutatingPath string, gotBody *map[string]any, mutated *bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
+			writeJSON(t, w, map[string]any{
+				"projects": []map[string]any{{
+					"id":              "project_1",
+					"organization_id": "org_1",
+					"region":          "swedencentral",
+					"name":            "test-app",
+					"slug":            "test-app",
+					"state":           "ready",
+				}},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == mutatingPath:
+			*mutated = true
+			if gotBody != nil {
+				if err := decodeJSON(r, gotBody); err != nil {
+					t.Fatalf("decode body: %v", err)
+				}
+			}
+			writeJSON(t, w, map[string]any{
+				"job": map[string]any{
+					"id":              "job_1",
+					"organization_id": "org_1",
+					"project_id":      "project_1",
+					"state":           "pending",
+					"type":            "project.import",
+					"max_attempts":    3,
+					"created_at":      "2026-07-14T00:00:00Z",
+					"updated_at":      "2026-07-14T00:00:00Z",
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+}
+
+// The typed-name/--confirm gates are the safety rails on the destructive
+// import family: non-interactive runs must hard-refuse without the flag and
+// must never reach the mutating endpoint.
+func TestImportRefusesWithoutConfirmNonInteractive(t *testing.T) {
+	t.Setenv("CI", "true")
+
+	var mutated bool
+	server := newImportGateServer(t, "/v1/projects/project_1/imports", nil, &mutated)
+	defer server.Close()
+
+	application := &app{cwd: t.TempDir()}
+	command := newRootCommand(application, "test")
+	command.SetOut(new(bytes.Buffer))
+	command.SetErr(new(bytes.Buffer))
+	command.SetArgs([]string{
+		"import",
+		"--project", "test-app",
+		"--source-url", "postgres://user:pass@db.example.com:5432/app",
+		"--api-url", server.URL,
+		"--api-key", "capy_test_key",
+	})
+
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "not confirmed") {
+		t.Fatalf("expected confirm refusal, got %v", err)
+	}
+	if mutated {
+		t.Fatalf("import endpoint was called despite the refused gate")
+	}
+}
+
+func TestImportConfirmFlagSendsConfirmTrue(t *testing.T) {
+	t.Setenv("CI", "true")
+
+	var mutated bool
+	gotBody := map[string]any{}
+	server := newImportGateServer(t, "/v1/projects/project_1/imports", &gotBody, &mutated)
+	defer server.Close()
+
+	application := &app{cwd: t.TempDir()}
+	command := newRootCommand(application, "test")
+	command.SetOut(new(bytes.Buffer))
+	command.SetErr(new(bytes.Buffer))
+	command.SetArgs([]string{
+		"import",
+		"--project", "test-app",
+		"--source-url", "postgres://user:pass@db.example.com:5432/app",
+		"--confirm",
+		"--api-url", server.URL,
+		"--api-key", "capy_test_key",
+	})
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("execute import --confirm: %v", err)
+	}
+	if !mutated {
+		t.Fatalf("import endpoint was never called")
+	}
+	if gotBody["confirm"] != true {
+		t.Fatalf("expected confirm: true in body, got %#v", gotBody)
+	}
+}
+
+func TestImportFollowRefusesWithoutConfirmNonInteractive(t *testing.T) {
+	t.Setenv("CI", "true")
+
+	var mutated bool
+	server := newImportGateServer(t, "/v1/projects/project_1/imports/follow", nil, &mutated)
+	defer server.Close()
+
+	application := &app{cwd: t.TempDir()}
+	command := newRootCommand(application, "test")
+	command.SetOut(new(bytes.Buffer))
+	command.SetErr(new(bytes.Buffer))
+	command.SetArgs([]string{
+		"import",
+		"--follow",
+		"--project", "test-app",
+		"--source-url", "postgres://user:pass@db.example.com:5432/app",
+		"--api-url", server.URL,
+		"--api-key", "capy_test_key",
+	})
+
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "not confirmed") {
+		t.Fatalf("expected confirm refusal, got %v", err)
+	}
+	if mutated {
+		t.Fatalf("follow start endpoint was called despite the refused gate")
+	}
+}
+
+func TestImportFollowConfirmFlagSendsConfirmTrue(t *testing.T) {
+	t.Setenv("CI", "true")
+
+	var mutated bool
+	gotBody := map[string]any{}
+	server := newImportGateServer(t, "/v1/projects/project_1/imports/follow", &gotBody, &mutated)
+	defer server.Close()
+
+	application := &app{cwd: t.TempDir()}
+	command := newRootCommand(application, "test")
+	command.SetOut(new(bytes.Buffer))
+	command.SetErr(new(bytes.Buffer))
+	command.SetArgs([]string{
+		"import",
+		"--follow",
+		"--project", "test-app",
+		"--source-url", "postgres://user:pass@db.example.com:5432/app",
+		"--confirm",
+		"--api-url", server.URL,
+		"--api-key", "capy_test_key",
+	})
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("execute import --follow --confirm: %v", err)
+	}
+	if !mutated {
+		t.Fatalf("follow start endpoint was never called")
+	}
+	if gotBody["confirm"] != true {
+		t.Fatalf("expected confirm: true in body, got %#v", gotBody)
+	}
+}
+
+func TestImportCutoverRefusesWithoutConfirmNonInteractive(t *testing.T) {
+	t.Setenv("CI", "true")
+
+	var mutated bool
+	server := newImportGateServer(t, "/v1/projects/project_1/imports/follow/cutover", nil, &mutated)
+	defer server.Close()
+
+	application := &app{cwd: t.TempDir()}
+	command := newRootCommand(application, "test")
+	command.SetOut(new(bytes.Buffer))
+	command.SetErr(new(bytes.Buffer))
+	command.SetArgs([]string{
+		"import", "cutover",
+		"--project", "test-app",
+		"--api-url", server.URL,
+		"--api-key", "capy_test_key",
+	})
+
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "not confirmed") {
+		t.Fatalf("expected confirm refusal, got %v", err)
+	}
+	if mutated {
+		t.Fatalf("cutover endpoint was called despite the refused gate")
+	}
+}
+
+func TestCredentialsRotateConfirmFlag(t *testing.T) {
+	t.Setenv("CI", "true")
+
+	var mutated bool
+	server := newImportGateServer(t, "/v1/projects/project_1/credentials/rotate", nil, &mutated)
+	defer server.Close()
+
+	application := &app{cwd: t.TempDir()}
+	command := newRootCommand(application, "test")
+	command.SetOut(new(bytes.Buffer))
+	command.SetErr(new(bytes.Buffer))
+	command.SetArgs([]string{
+		"credentials", "rotate",
+		"--project", "test-app",
+		"--confirm",
+		"--api-url", server.URL,
+		"--api-key", "capy_test_key",
+	})
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("execute credentials rotate --confirm: %v", err)
+	}
+	if !mutated {
+		t.Fatalf("rotate endpoint was never called")
+	}
+}
+
+func TestRestoreConfirmFlagAliasesOverwrite(t *testing.T) {
+	t.Setenv("CI", "true")
+
+	var mutated bool
+	gotBody := map[string]any{}
+	server := newImportGateServer(t, "/v1/projects/project_1/restores", &gotBody, &mutated)
+	defer server.Close()
+
+	application := &app{cwd: t.TempDir()}
+	command := newRootCommand(application, "test")
+	command.SetOut(new(bytes.Buffer))
+	command.SetErr(new(bytes.Buffer))
+	command.SetArgs([]string{
+		"restore",
+		"--project", "test-app",
+		"--target-kind", "project",
+		"--backup-key", "logical/app/20260714.dump",
+		"--confirm",
+		"--api-url", server.URL,
+		"--api-key", "capy_test_key",
+	})
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("execute restore --confirm: %v", err)
+	}
+	if !mutated {
+		t.Fatalf("restore endpoint was never called")
+	}
+	if gotBody["confirm_project_overwrite"] != true {
+		t.Fatalf("expected confirm_project_overwrite: true in body, got %#v", gotBody)
+	}
+}
+
+func TestPreviewCreateRejectsOutOfRangeTTL(t *testing.T) {
+	t.Setenv("CI", "true")
+
+	application := &app{cwd: t.TempDir()}
+	command := newRootCommand(application, "test")
+	command.SetOut(new(bytes.Buffer))
+	command.SetErr(new(bytes.Buffer))
+	command.SetArgs([]string{
+		"preview", "create",
+		"--project", "test-app",
+		"--ttl-hours", "500",
+		"--api-url", "http://127.0.0.1:0",
+		"--api-key", "capy_test_key",
+	})
+
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--ttl-hours must be between 1 and 168") {
+		t.Fatalf("expected ttl range error, got %v", err)
 	}
 }

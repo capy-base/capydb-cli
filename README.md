@@ -4,6 +4,25 @@ The CapyDB CLI is a Go binary for linking local projects to existing CapyDB proj
 
 ## Installation
 
+Homebrew (macOS/Linux):
+
+```bash
+brew install capy-base/tap/capydb
+```
+
+Curl installer (macOS/Linux; verifies the release checksum, installs to
+`/usr/local/bin` or `$CAPYDB_INSTALL_DIR`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/capy-base/capydb-cli/main/scripts/install.sh | sh
+```
+
+With `go install`:
+
+```bash
+go install github.com/capy-base/capydb/cli/cmd/capydb@latest
+```
+
 From source:
 
 ```bash
@@ -12,13 +31,7 @@ cd cli
 make build
 ```
 
-With `go install`:
-
-```bash
-go install github.com/capy-base/capydb-cli/cmd/capydb-cli@latest
-```
-
-Release archives are built for macOS, Linux, and Windows. Tagged releases also publish checksums, SBOMs, and a container image.
+Release archives are built for macOS, Linux, and Windows. Tagged releases also publish checksums, SBOMs, a container image, and the Homebrew cask.
 
 ## Default flow
 
@@ -43,7 +56,13 @@ The CLI will:
 - `capydb login`
 - `capydb logout`
 - `capydb whoami`
-- `capydb status`
+- `capydb status [--remote] [--project <ref>]`
+- `capydb doctor` (checks config, API reachability, auth, the local project link, and psql; non-zero exit when any check fails)
+- `capydb config show` (resolved config; the API key is shown only as a `****abcd` fingerprint)
+- `capydb version [--check]` (build info; `--check` compares against the latest GitHub release with a 5s timeout and degrades to a warning offline)
+- `capydb orgs list` / `capydb orgs switch <org-id|slug>` (the CLI stores credentials per organization; switch the active one)
+- `capydb projects list`
+- `capydb regions list`
 - `capydb link`
 - `capydb unlink`
 - `capydb env pull`
@@ -54,10 +73,39 @@ The CLI will:
 - `capydb preview extend <preview-id> --ttl-hours N`
 - `capydb backups list`
 - `capydb backups create`
-- `capydb import`
+- `capydb import` / `capydb import preflight --source-url <url>` (checks size, Postgres version, and extension compatibility before any destructive step)
 - `capydb restore`
 - `capydb jobs get`
 - `capydb studio`
+- `capydb connection-string [--pooled] [--preview <id>]` (prints only the URL - script-friendly)
+- `capydb psql [--pooled] [--preview <id>] [-- <psql args>]` (opens psql against the project or a preview)
+- `capydb sql "select ..." [--max-rows N] [--json]` (runs a query through the bounded SQL runner)
+- `capydb metrics [--json]` (storage/connection usage, alerts, active and slow queries)
+- `capydb extensions list|enable <name>|disable <name> [--project <ref>]` (Postgres extensions; enable/disable queue jobs and support `--wait`)
+- `capydb alerts list [--project <ref>]` / `capydb alerts ack <alert-id> [--project <ref>]` (resource alerts)
+- `capydb audit list [--project <ref>] [--limit N]` (project audit events)
+- `capydb api-keys list|create|revoke` (`create` requires `--name` and `--scopes`; `--project` makes the key project-scoped; the plaintext key is shown exactly once)
+- `capydb webhooks list|create|delete|rotate-secret|deliveries` (organization webhook endpoints; signing secrets are shown exactly once)
+- `capydb completion bash|zsh|fish|powershell` (shell completions; release archives and the Homebrew cask ship pre-generated scripts)
+
+Global flags on every command:
+
+- `--output text|json` (`-o`): switch between human-readable text and machine-readable JSON. In JSON mode stdout carries only the JSON document, and lists always marshal as `[]`, never `null`.
+- `--api-url`, `--api-key`, `--app-url`: override the saved configuration for one invocation.
+
+Commands that queue async jobs (`create`, `preview create|delete|reset`, `backups create`, `import`, `restore`, `extensions enable|disable`, `jobs get`) accept `--wait` plus `--wait-timeout` (default 30m). Dump uploads are bounded by a 30m deadline; `CAPYDB_HTTP_TIMEOUT` (a Go duration such as `45s` or `2m`) overrides both the API and upload timeouts.
+
+## Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | success |
+| 1 | generic error |
+| 2 | usage or validation error |
+| 3 | authentication or authorization error (HTTP 401/403, missing credentials) |
+| 4 | resource not found (HTTP 404/410) |
+| 5 | conflict or failed precondition (HTTP 409/412/428) |
+| 6 | timeout (HTTP 408/504, `--wait-timeout` expiry) |
 
 Compatibility aliases:
 
@@ -87,7 +135,7 @@ If you omit `--project`, the CLI will use the linked project in `.capydb/project
 
 Saved globally:
 
-- CLI auth and active organization info go in the user config directory.
+- CLI auth goes in the user config directory (`capydb/config.json`), keyed per organization with an `active_org` pointer. Older single-credential config files are migrated to the per-organization shape automatically on first load. Use `capydb orgs list` and `capydb orgs switch` to manage entries, and `capydb config show` to inspect the resolved values.
 
 Saved locally:
 

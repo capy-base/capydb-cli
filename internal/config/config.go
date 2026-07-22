@@ -12,11 +12,15 @@ import (
 const defaultAPIURL = "https://capydb.dev/api/capydb"
 const defaultAppURL = "https://capydb.dev"
 
+// DefaultOrgKey keys credentials that were saved without a known organization
+// id (e.g. a manually pasted API key whose viewer has no organization).
+const DefaultOrgKey = "default"
+
 type ProjectConfig struct {
 	AppPath        string `json:"app_path,omitempty"`
 	APIURL         string `json:"api_url"`
 	DatabaseLayer  string `json:"database_layer,omitempty"`
-	ClusterID      string `json:"cluster_id"`
+	Region         string `json:"region,omitempty"`
 	DatabaseURLVar string `json:"database_url_var"`
 	DirectURLVar   string `json:"direct_url_var,omitempty"`
 	EnvFile        string `json:"env_file"`
@@ -29,13 +33,94 @@ type ProjectConfig struct {
 	ProjectSlug    string `json:"project_slug,omitempty"`
 }
 
+// OrganizationConfig holds the saved credentials and endpoints for one
+// organization the CLI has logged in to.
+type OrganizationConfig struct {
+	APIKey string `json:"api_key"`
+	APIURL string `json:"api_url"`
+	AppURL string `json:"app_url,omitempty"`
+	Name   string `json:"name,omitempty"`
+	Slug   string `json:"slug,omitempty"`
+}
+
+// UserConfig stores credentials per organization, keyed by organization id,
+// with ActiveOrg selecting the entry everyday commands use.
 type UserConfig struct {
+	ActiveOrg     string                        `json:"active_org,omitempty"`
+	Organizations map[string]OrganizationConfig `json:"organizations,omitempty"`
+}
+
+// legacyUserConfig is the pre-multi-org single-credential config shape. It is
+// migrated to UserConfig once on load and never written back.
+type legacyUserConfig struct {
 	APIKey           string `json:"api_key"`
 	APIURL           string `json:"api_url"`
 	AppURL           string `json:"app_url,omitempty"`
 	OrganizationID   string `json:"organization_id,omitempty"`
 	OrganizationName string `json:"organization_name,omitempty"`
 	OrganizationSlug string `json:"organization_slug,omitempty"`
+}
+
+// Active returns the active organization id and its credentials. ok is false
+// when no usable entry exists.
+func (c UserConfig) Active() (string, OrganizationConfig, bool) {
+	if len(c.Organizations) == 0 {
+		return "", OrganizationConfig{}, false
+	}
+	if entry, found := c.Organizations[c.ActiveOrg]; found {
+		return c.ActiveOrg, entry, true
+	}
+	// Self-heal a dangling active_org when exactly one entry exists.
+	if len(c.Organizations) == 1 {
+		for orgID, entry := range c.Organizations {
+			return orgID, entry, true
+		}
+	}
+	return "", OrganizationConfig{}, false
+}
+
+// APIKey returns the active organization's API key, or "".
+func (c UserConfig) APIKey() string {
+	_, entry, ok := c.Active()
+	if !ok {
+		return ""
+	}
+	return entry.APIKey
+}
+
+// APIURL returns the active organization's API URL, or the default.
+func (c UserConfig) APIURL() string {
+	_, entry, ok := c.Active()
+	if !ok || strings.TrimSpace(entry.APIURL) == "" {
+		return DefaultAPIURL()
+	}
+	return trimURL(entry.APIURL)
+}
+
+// AppURL returns the active organization's app URL, derived from the API URL
+// when unset.
+func (c UserConfig) AppURL() string {
+	_, entry, ok := c.Active()
+	if !ok || strings.TrimSpace(entry.AppURL) == "" {
+		return DefaultAppURL(c.APIURL())
+	}
+	return trimURL(entry.AppURL)
+}
+
+// Upsert adds or replaces the credentials for orgID and makes it the active
+// organization. An empty orgID is stored under DefaultOrgKey.
+func (c *UserConfig) Upsert(orgID string, entry OrganizationConfig) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		orgID = DefaultOrgKey
+	}
+	if c.Organizations == nil {
+		c.Organizations = map[string]OrganizationConfig{}
+	}
+	entry.APIURL = trimURL(firstNonEmpty(entry.APIURL, DefaultAPIURL()))
+	entry.AppURL = trimURL(firstNonEmpty(entry.AppURL, DefaultAppURL(entry.APIURL)))
+	c.Organizations[orgID] = entry
+	c.ActiveOrg = orgID
 }
 
 func DefaultAPIURL() string {
@@ -50,8 +135,8 @@ func DefaultAppURL(apiURL string) string {
 		return trimURL(value)
 	}
 	apiURL = trimURL(apiURL)
-	if strings.HasSuffix(apiURL, "/api/capydb") {
-		return strings.TrimSuffix(apiURL, "/api/capydb")
+	if before, ok := strings.CutSuffix(apiURL, "/api/capydb"); ok {
+		return before
 	}
 	if apiURL != "" {
 		return apiURL
@@ -78,6 +163,8 @@ func LoadProjectConfig(cwd string) (ProjectConfig, error) {
 	return cfg, nil
 }
 
+// LoadUserConfig reads the user config. A legacy single-credential file is
+// migrated to the per-organization shape and written back once.
 func LoadUserConfig() (UserConfig, error) {
 	path, err := UserConfigPath()
 	if err != nil {
@@ -87,7 +174,7 @@ func LoadUserConfig() (UserConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return UserConfig{APIURL: DefaultAPIURL()}, nil
+			return UserConfig{}, nil
 		}
 		return UserConfig{}, fmt.Errorf("read user config: %w", err)
 	}
@@ -96,10 +183,46 @@ func LoadUserConfig() (UserConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return UserConfig{}, fmt.Errorf("decode user config: %w", err)
 	}
+	if len(cfg.Organizations) > 0 {
+		normalize(&cfg)
+		return cfg, nil
+	}
 
-	cfg.APIURL = trimURL(firstNonEmpty(cfg.APIURL, DefaultAPIURL()))
-	cfg.AppURL = trimURL(firstNonEmpty(cfg.AppURL, DefaultAppURL(cfg.APIURL)))
+	// Legacy shape: a flat single-credential object. Convert and persist the
+	// new shape so the migration runs exactly once.
+	var legacy legacyUserConfig
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return UserConfig{}, fmt.Errorf("decode user config: %w", err)
+	}
+	if strings.TrimSpace(legacy.APIKey) == "" {
+		return UserConfig{}, nil
+	}
+
+	cfg = UserConfig{}
+	cfg.Upsert(legacy.OrganizationID, OrganizationConfig{
+		APIKey: strings.TrimSpace(legacy.APIKey),
+		APIURL: legacy.APIURL,
+		AppURL: legacy.AppURL,
+		Name:   legacy.OrganizationName,
+		Slug:   legacy.OrganizationSlug,
+	})
+	if err := SaveUserConfig(cfg); err != nil {
+		return UserConfig{}, fmt.Errorf("migrate user config: %w", err)
+	}
 	return cfg, nil
+}
+
+func normalize(cfg *UserConfig) {
+	for orgID, entry := range cfg.Organizations {
+		entry.APIURL = trimURL(firstNonEmpty(entry.APIURL, DefaultAPIURL()))
+		entry.AppURL = trimURL(firstNonEmpty(entry.AppURL, DefaultAppURL(entry.APIURL)))
+		cfg.Organizations[orgID] = entry
+	}
+	if _, found := cfg.Organizations[cfg.ActiveOrg]; !found && len(cfg.Organizations) == 1 {
+		for orgID := range cfg.Organizations {
+			cfg.ActiveOrg = orgID
+		}
+	}
 }
 
 func ProjectConfigPath(cwd string) string {
@@ -135,8 +258,7 @@ func SaveUserConfig(cfg UserConfig) error {
 		return fmt.Errorf("create config directory: %w", err)
 	}
 
-	cfg.APIURL = trimURL(firstNonEmpty(cfg.APIURL, DefaultAPIURL()))
-	cfg.AppURL = trimURL(firstNonEmpty(cfg.AppURL, DefaultAppURL(cfg.APIURL)))
+	normalize(&cfg)
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode user config: %w", err)

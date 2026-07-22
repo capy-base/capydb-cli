@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -45,6 +46,9 @@ func (a *app) newPreviewCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("list previews: %w", err)
 			}
+			if a.jsonOutput() {
+				return printJSON(cmd.OutOrStdout(), map[string]any{"previews": jsonList(previews)})
+			}
 			if len(previews) == 0 {
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No preview databases for project %s\n", project.Name)
 				return nil
@@ -61,11 +65,17 @@ func (a *app) newPreviewCommand() *cobra.Command {
 	var createProjectRef string
 	var createTTLHours int
 	var createWait bool
+	var createWaitTimeout time.Duration
 	createCommand := &cobra.Command{
 		Use:   "create",
 		Short: "Create a preview database for a project",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			// Same range the server enforces (and `preview extend` validates)
+			// - reject locally to save the round-trip. 0 means server default.
+			if createTTLHours != 0 && (createTTLHours < 1 || createTTLHours > 168) {
+				return usageErrorf("--ttl-hours must be between 1 and 168")
+			}
 			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
 			if err != nil {
 				return err
@@ -76,7 +86,7 @@ func (a *app) newPreviewCommand() *cobra.Command {
 				return err
 			}
 
-			preview, job, err := client.CreatePreviewDatabase(ctx, project.ID, api.CreatePreviewRequest{
+			created, job, err := client.CreatePreviewDatabase(ctx, project.ID, api.CreatePreviewRequest{
 				Mode:     strings.TrimSpace(createMode),
 				Name:     strings.TrimSpace(createName),
 				TTLHours: createTTLHours,
@@ -85,22 +95,42 @@ func (a *app) newPreviewCommand() *cobra.Command {
 				return fmt.Errorf("create preview: %w", err)
 			}
 
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Created preview %s (%s) for project %s\n", preview.Preview.Name, preview.Preview.ID, project.Name)
-			writePreviewTable(cmd.OutOrStdout(), []api.PreviewDetails{preview})
+			// The preview itself was created; a failure to fetch its
+			// connection details is surfaced as a warning, not an error.
+			preview := api.PreviewDetails{Preview: created}
+			connections, connErr := client.GetPreviewConnection(ctx, created.ID)
+			if connErr != nil {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: preview created, but fetching connection details failed: %v\n", connErr)
+			} else {
+				preview.Connections = connections
+			}
+
+			if !a.jsonOutput() {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Created preview %s (%s) for project %s\n", preview.Preview.Name, preview.Preview.ID, project.Name)
+				writePreviewTable(cmd.OutOrStdout(), []api.PreviewDetails{preview})
+			}
 
 			if createWait && job.ID != "" {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Waiting for job %s\n", job.ID)
-				job, err = waitForJob(ctx, client, job.ID)
+				if !a.jsonOutput() {
+					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Waiting for job %s\n", job.ID)
+				}
+				job, err = waitForJob(ctx, cmd.ErrOrStderr(), client, job.ID, createWaitTimeout)
 				if err != nil {
 					return err
 				}
 				if err := ensureCompletedJob(job, "preview creation"); err != nil {
 					return err
 				}
-				latestPreview, err := a.resolvePreview(ctx, client, project.ID, preview.Preview.ID)
-				if err == nil {
-					writePreviewTable(cmd.OutOrStdout(), []api.PreviewDetails{latestPreview})
+				if latestPreview, latestErr := a.resolvePreview(ctx, client, project.ID, preview.Preview.ID); latestErr == nil {
+					preview = latestPreview
+					if !a.jsonOutput() {
+						writePreviewTable(cmd.OutOrStdout(), []api.PreviewDetails{preview})
+					}
 				}
+			}
+
+			if a.jsonOutput() {
+				return printJSON(cmd.OutOrStdout(), map[string]any{"preview": preview, "job": job})
 			}
 			return nil
 		},
@@ -109,11 +139,12 @@ func (a *app) newPreviewCommand() *cobra.Command {
 	createCommand.Flags().StringVar(&createMode, "mode", "", "Preview mode: empty or clone")
 	createCommand.Flags().StringVar(&createName, "name", "", "Preview name")
 	createCommand.Flags().IntVar(&createTTLHours, "ttl-hours", 0, "Preview TTL in hours")
-	createCommand.Flags().BoolVar(&createWait, "wait", false, "Wait for the preview create job to finish")
+	addWaitFlags(createCommand, &createWait, &createWaitTimeout, "preview create")
 
 	var deletePreviewRef string
 	var deleteProjectRef string
 	var deleteWait bool
+	var deleteWaitTimeout time.Duration
 	deleteCommand := &cobra.Command{
 		Use:   "delete",
 		Short: "Delete a preview database",
@@ -137,17 +168,20 @@ func (a *app) newPreviewCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("delete preview: %w", err)
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued delete for preview %s (%s)\n", preview.Preview.Name, preview.Preview.ID)
-			return maybeWaitForJob(ctx, cmd.OutOrStdout(), client, job, deleteWait, "preview delete")
+			if !a.jsonOutput() {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued delete for preview %s (%s)\n", preview.Preview.Name, preview.Preview.ID)
+			}
+			return a.maybeWaitForJob(cmd, client, job, deleteWait, deleteWaitTimeout, "preview delete")
 		},
 	}
 	deleteCommand.Flags().StringVar(&deleteProjectRef, "project", "", "Project id, slug, or name")
 	deleteCommand.Flags().StringVar(&deletePreviewRef, "preview", "", "Preview id or name")
-	deleteCommand.Flags().BoolVar(&deleteWait, "wait", false, "Wait for the preview delete job to finish")
+	addWaitFlags(deleteCommand, &deleteWait, &deleteWaitTimeout, "preview delete")
 
 	var resetPreviewRef string
 	var resetProjectRef string
 	var resetWait bool
+	var resetWaitTimeout time.Duration
 	resetCommand := &cobra.Command{
 		Use:   "reset",
 		Short: "Reset a preview database",
@@ -171,13 +205,15 @@ func (a *app) newPreviewCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("reset preview: %w", err)
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued reset for preview %s (%s)\n", preview.Preview.Name, preview.Preview.ID)
-			return maybeWaitForJob(ctx, cmd.OutOrStdout(), client, job, resetWait, "preview reset")
+			if !a.jsonOutput() {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued reset for preview %s (%s)\n", preview.Preview.Name, preview.Preview.ID)
+			}
+			return a.maybeWaitForJob(cmd, client, job, resetWait, resetWaitTimeout, "preview reset")
 		},
 	}
 	resetCommand.Flags().StringVar(&resetProjectRef, "project", "", "Project id, slug, or name")
 	resetCommand.Flags().StringVar(&resetPreviewRef, "preview", "", "Preview id or name")
-	resetCommand.Flags().BoolVar(&resetWait, "wait", false, "Wait for the preview reset job to finish")
+	addWaitFlags(resetCommand, &resetWait, &resetWaitTimeout, "preview reset")
 
 	var extendTTLHours int
 	extendCommand := &cobra.Command{
@@ -188,10 +224,10 @@ func (a *app) newPreviewCommand() *cobra.Command {
 			ctx := cmd.Context()
 			previewID := strings.TrimSpace(args[0])
 			if previewID == "" {
-				return fmt.Errorf("preview id is required")
+				return usageErrorf("preview id is required")
 			}
 			if extendTTLHours < 1 || extendTTLHours > 168 {
-				return fmt.Errorf("--ttl-hours must be between 1 and 168")
+				return usageErrorf("--ttl-hours must be between 1 and 168")
 			}
 
 			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
@@ -204,7 +240,10 @@ func (a *app) newPreviewCommand() *cobra.Command {
 				return fmt.Errorf("extend preview: %w", err)
 			}
 
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Extended preview %s (%s) by %dh\n", preview.Name, preview.ID, extendTTLHours)
+			if a.jsonOutput() {
+				return printJSON(cmd.OutOrStdout(), map[string]any{"preview": preview})
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Set preview %s (%s) TTL to %dh from now\n", preview.Name, preview.ID, extendTTLHours)
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "ttl_expires_at: %s\n", formatTime(preview.TTLExpiresAt))
 			return nil
 		},
@@ -246,6 +285,9 @@ func (a *app) newBackupsCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("list backups: %w", err)
 			}
+			if a.jsonOutput() {
+				return printJSON(cmd.OutOrStdout(), map[string]any{"backups": jsonList(backups)})
+			}
 			if len(backups) == 0 {
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No backups for project %s\n", project.Name)
 				return nil
@@ -260,6 +302,7 @@ func (a *app) newBackupsCommand() *cobra.Command {
 	var createLabel string
 	var createProjectRef string
 	var createWait bool
+	var createWaitTimeout time.Duration
 	createCommand := &cobra.Command{
 		Use:   "create",
 		Short: "Queue a backup for a project",
@@ -279,32 +322,513 @@ func (a *app) newBackupsCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create backup: %w", err)
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued backup job %s for project %s\n", job.ID, project.Name)
-			return maybeWaitForJob(ctx, cmd.OutOrStdout(), client, job, createWait, "backup")
+			if !a.jsonOutput() {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued backup job %s for project %s\n", job.ID, project.Name)
+			}
+			return a.maybeWaitForJob(cmd, client, job, createWait, createWaitTimeout, "backup")
 		},
 	}
 	createCommand.Flags().StringVar(&createProjectRef, "project", "", "Project id, slug, or name")
 	createCommand.Flags().StringVar(&createLabel, "label", "", "Optional backup label")
-	createCommand.Flags().BoolVar(&createWait, "wait", false, "Wait for the backup job to finish")
+	addWaitFlags(createCommand, &createWait, &createWaitTimeout, "backup")
 
 	command.AddCommand(listCommand)
 	command.AddCommand(createCommand)
+	command.AddCommand(a.newBackupScheduleCommand())
 	return command
 }
 
+func (a *app) newBackupScheduleCommand() *cobra.Command {
+	command := &cobra.Command{
+		Use:   "schedule",
+		Short: "Manage the project's daily backup schedule",
+	}
+
+	var getProjectRef string
+	getCommand := &cobra.Command{
+		Use:   "get",
+		Short: "Show the backup schedule for a project",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+			if err != nil {
+				return err
+			}
+
+			project, err := a.resolveProject(ctx, client, getProjectRef)
+			if err != nil {
+				return err
+			}
+
+			schedules, err := client.ListScheduledBackups(ctx, project.ID)
+			if err != nil {
+				return fmt.Errorf("list scheduled backups: %w", err)
+			}
+			if a.jsonOutput() {
+				return printJSON(cmd.OutOrStdout(), map[string]any{"scheduled_backups": jsonList(schedules)})
+			}
+			if len(schedules) == 0 {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No backup schedule for project %s\n", project.Name)
+				return nil
+			}
+
+			writeScheduledBackupTable(cmd.OutOrStdout(), schedules)
+			return nil
+		},
+	}
+	getCommand.Flags().StringVar(&getProjectRef, "project", "", "Project id, slug, or name")
+
+	var setHour int
+	var setLabel string
+	var setMinute int
+	var setProjectRef string
+	var setRetentionDays int
+	setCommand := &cobra.Command{
+		Use:   "set",
+		Short: "Create or update the project's daily backup schedule",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			if setHour < 0 || setHour > 23 {
+				return usageErrorf("--hour must be between 0 and 23")
+			}
+			if setMinute < 0 || setMinute > 59 {
+				return usageErrorf("--minute must be between 0 and 59")
+			}
+			if setRetentionDays != 0 && (setRetentionDays < 1 || setRetentionDays > 365) {
+				return usageErrorf("--retention-days must be between 1 and 365")
+			}
+
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+			if err != nil {
+				return err
+			}
+
+			project, err := a.resolveProject(ctx, client, setProjectRef)
+			if err != nil {
+				return err
+			}
+
+			schedule, err := client.UpsertScheduledBackup(ctx, project.ID, api.UpsertScheduledBackupRequest{
+				CronHour:      setHour,
+				CronMinute:    setMinute,
+				IsActive:      true,
+				Label:         strings.TrimSpace(setLabel),
+				RetentionDays: setRetentionDays,
+			})
+			if err != nil {
+				return fmt.Errorf("set backup schedule: %w", err)
+			}
+			if a.jsonOutput() {
+				return printJSON(cmd.OutOrStdout(), map[string]any{"scheduled_backup": schedule})
+			}
+			_, _ = fmt.Fprintf(
+				cmd.OutOrStdout(),
+				"Backup schedule for project %s: daily at %02d:%02d UTC, retention %dd\n",
+				project.Name,
+				schedule.CronHour,
+				schedule.CronMinute,
+				schedule.RetentionDays,
+			)
+			return nil
+		},
+	}
+	setCommand.Flags().StringVar(&setProjectRef, "project", "", "Project id, slug, or name")
+	setCommand.Flags().IntVar(&setHour, "hour", 0, "UTC hour of day to run the backup (0-23)")
+	setCommand.Flags().IntVar(&setMinute, "minute", 0, "Minute of the hour to run the backup (0-59)")
+	setCommand.Flags().IntVar(&setRetentionDays, "retention-days", 0, "Days to keep scheduled backups (1-365; server default when omitted)")
+	setCommand.Flags().StringVar(&setLabel, "label", "", "Optional label for scheduled backups")
+
+	var disableProjectRef string
+	disableCommand := &cobra.Command{
+		Use:   "disable",
+		Short: "Disable the project's backup schedule",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+			if err != nil {
+				return err
+			}
+
+			project, err := a.resolveProject(ctx, client, disableProjectRef)
+			if err != nil {
+				return err
+			}
+
+			schedules, err := client.ListScheduledBackups(ctx, project.ID)
+			if err != nil {
+				return fmt.Errorf("list scheduled backups: %w", err)
+			}
+			if len(schedules) == 0 {
+				return notFoundErrorf("project %s has no backup schedule to disable", project.Name)
+			}
+
+			// The upsert replaces the single default schedule wholesale, so the
+			// existing cadence/retention/label are carried over unchanged.
+			current := schedules[0]
+			schedule, err := client.UpsertScheduledBackup(ctx, project.ID, api.UpsertScheduledBackupRequest{
+				CronHour:      current.CronHour,
+				CronMinute:    current.CronMinute,
+				IsActive:      false,
+				Label:         current.Label,
+				RetentionDays: current.RetentionDays,
+			})
+			if err != nil {
+				return fmt.Errorf("disable backup schedule: %w", err)
+			}
+			if a.jsonOutput() {
+				return printJSON(cmd.OutOrStdout(), map[string]any{"scheduled_backup": schedule})
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Disabled backup schedule for project %s\n", project.Name)
+			return nil
+		},
+	}
+	disableCommand.Flags().StringVar(&disableProjectRef, "project", "", "Project id, slug, or name")
+
+	command.AddCommand(getCommand)
+	command.AddCommand(setCommand)
+	command.AddCommand(disableCommand)
+	return command
+}
+
+func writeScheduledBackupTable(out io.Writer, schedules []api.ScheduledBackup) {
+	writer := tabwriter.NewWriter(out, 0, 8, 2, ' ', 0)
+	_, _ = fmt.Fprintln(writer, "ID\tLABEL\tACTIVE\tRUNS_AT_UTC\tRETENTION\tLAST_RUN_AT")
+	for _, schedule := range schedules {
+		active := "no"
+		if schedule.IsActive {
+			active = "yes"
+		}
+		lastRun := "-"
+		if schedule.LastRunAt != nil {
+			lastRun = schedule.LastRunAt.UTC().Format(time.RFC3339)
+		}
+		_, _ = fmt.Fprintf(
+			writer,
+			"%s\t%s\t%s\t%02d:%02d\t%dd\t%s\n",
+			schedule.ID,
+			firstNonEmpty(schedule.Label, "-"),
+			active,
+			schedule.CronHour,
+			schedule.CronMinute,
+			schedule.RetentionDays,
+			lastRun,
+		)
+	}
+	_ = writer.Flush()
+}
+
 func (a *app) newImportCommand() *cobra.Command {
+	var dumpFile string
 	var projectRef string
 	var recreate bool
 	var sourceURL string
+	var follow bool
+	var confirm bool
 	var wait bool
+	var waitTimeout time.Duration
 
 	command := &cobra.Command{
 		Use:   "import",
-		Short: "Import data from another Postgres database into a project",
+		Short: "Import data from another Postgres database or a dump file into a project",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			sourceURL = strings.TrimSpace(sourceURL)
+			dumpFile = strings.TrimSpace(dumpFile)
+
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+			if err != nil {
+				return err
+			}
+			project, err := a.resolveProject(ctx, client, projectRef)
+			if err != nil {
+				return err
+			}
+
+			// --follow: near-zero-downtime streaming import. Base-copies then
+			// streams the source's changes until `capydb import cutover`.
+			if follow {
+				switch {
+				case sourceURL == "":
+					return usageErrorf("--follow requires --source-url")
+				case dumpFile != "":
+					return usageErrorf("--follow cannot be used with --file (dump files are point-in-time)")
+				case recreate:
+					return usageErrorf("--follow cannot be used with --recreate")
+				}
+				// The follower writes into the live database from the start
+				// (base copy, then continuous streaming) - the cutover confirm
+				// arrives only after that data has already landed, so the start
+				// gets the same typed-name gate as a plain import.
+				confirmed, confirmErr := confirmProjectDestructiveAction(cmd, project, confirm,
+					"A follow import begins writing into the LIVE database for project %q (%s) immediately (base copy, then continuous streaming until cutover).\n")
+				if confirmErr != nil {
+					return confirmErr
+				}
+				if !confirmed {
+					return fmt.Errorf("follow import not confirmed; pass --confirm or confirm interactively")
+				}
+				job, startErr := client.StartImportFollow(ctx, project.ID, sourceURL)
+				if startErr != nil {
+					return fmt.Errorf("start follow import: %w", startErr)
+				}
+				if !a.jsonOutput() {
+					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Started follow import (job %s) for project %s.\nWatch progress with `capydb import follow-status`, then finish with `capydb import cutover`.\n", job.ID, project.Name)
+				}
+				return a.maybeWaitForJob(cmd, client, job, wait, waitTimeout, "import follow start")
+			}
+
+			switch {
+			case sourceURL == "" && dumpFile == "":
+				return usageErrorf("one of --source-url or --file is required")
+			case sourceURL != "" && dumpFile != "":
+				return usageErrorf("--source-url and --file are mutually exclusive")
+			}
+
+			// Import loads into the project's live database - same blast radius
+			// as an overwrite restore, so it gets the same typed-name gate.
+			confirmed, confirmErr := confirmProjectDestructiveAction(cmd, project, confirm,
+				"This will load the imported data into the LIVE database for project %q (%s).\n")
+			if confirmErr != nil {
+				return confirmErr
+			}
+			if !confirmed {
+				return fmt.Errorf("import not confirmed; pass --confirm or confirm interactively")
+			}
+
+			request := api.CreateImportRequest{Confirm: true, Recreate: recreate, SourceURL: sourceURL}
+			if dumpFile != "" {
+				uploadKey, uploadErr := uploadImportDump(ctx, cmd.ErrOrStderr(), client, project.ID, dumpFile)
+				if uploadErr != nil {
+					return uploadErr
+				}
+				request.UploadKey = uploadKey
+			}
+
+			job, err := client.CreateImport(ctx, project.ID, request)
+			if err != nil {
+				return fmt.Errorf("create import: %w", err)
+			}
+			if !a.jsonOutput() {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued import job %s for project %s\n", job.ID, project.Name)
+			}
+			return a.maybeWaitForJob(cmd, client, job, wait, waitTimeout, "import")
+		},
+	}
+
+	command.Flags().StringVar(&projectRef, "project", "", "Project id, slug, or name")
+	command.Flags().StringVar(&sourceURL, "source-url", "", "Source Postgres connection string (use the provider's direct endpoint - Neon '-pooler' hosts and Supabase's transaction pooler on port 6543 are rejected)")
+	command.Flags().StringVar(&dumpFile, "file", "", "Path to a pg_dump file to upload and import (custom format recommended: pg_dump -Fc)")
+	command.Flags().BoolVar(&recreate, "recreate", false, "Recreate the target database before import")
+	command.Flags().BoolVar(&follow, "follow", false, "Near-zero-downtime import: base-copy then stream the source's changes until `capydb import cutover` (source needs logical replication enabled)")
+	command.Flags().BoolVar(&confirm, "confirm", false, "Confirm loading the imported data into the project's live database")
+	addWaitFlags(command, &wait, &waitTimeout, "import")
+
+	command.AddCommand(a.newImportPreflightCommand())
+	command.AddCommand(a.newImportFollowStatusCommand())
+	command.AddCommand(a.newImportCutoverCommand())
+	command.AddCommand(a.newImportFollowAbortCommand())
+	return command
+}
+
+func (a *app) newImportFollowStatusCommand() *cobra.Command {
+	var projectRef string
+	var wait bool
+	var waitTimeout time.Duration
+	command := &cobra.Command{
+		Use:   "follow-status",
+		Short: "Show progress of an in-progress follow import (replication lag, phase)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+			if err != nil {
+				return err
+			}
+			project, err := a.resolveProject(ctx, client, projectRef)
+			if err != nil {
+				return err
+			}
+			job, err := client.ImportFollowStatus(ctx, project.ID)
+			if err != nil {
+				return fmt.Errorf("follow status: %w", err)
+			}
+			if !wait {
+				return a.maybeWaitForJob(cmd, client, job, wait, waitTimeout, "import follow status")
+			}
+			job, err = waitForJob(ctx, cmd.ErrOrStderr(), client, job.ID, waitTimeout)
+			if err != nil {
+				return err
+			}
+			// The status payload (unit state, replication lag, sentinel LSNs)
+			// is the whole point of this command; render it, not just the job.
+			result, resultErr := client.GetJobResult(ctx, job.ID)
+			if a.jsonOutput() {
+				if resultErr == nil && len(result) > 0 {
+					if err := printJSON(cmd.OutOrStdout(), struct {
+						Job    api.Job         `json:"job"`
+						Result json.RawMessage `json:"result"`
+					}{Job: job, Result: result}); err != nil {
+						return err
+					}
+				} else if err := a.printJob(cmd, job); err != nil {
+					return err
+				}
+				return ensureCompletedJob(job, "import follow status")
+			}
+			writeJob(cmd.OutOrStdout(), job)
+			if resultErr == nil && len(result) > 0 {
+				writeImportFollowStatus(cmd.OutOrStdout(), result)
+			}
+			return ensureCompletedJob(job, "import follow status")
+		},
+	}
+	command.Flags().StringVar(&projectRef, "project", "", "Project id, slug, or name")
+	addWaitFlags(command, &wait, &waitTimeout, "import follow status")
+	return command
+}
+
+// writeImportFollowStatus renders the follow-status job's structured result in
+// human terms: whether the follower is streaming, how far behind the source it
+// is, and what to do next.
+func writeImportFollowStatus(out io.Writer, result json.RawMessage) {
+	var status struct {
+		UnitActive string          `json:"unit_active"`
+		Result     string          `json:"result"`
+		LagBytes   *int64          `json:"lag_bytes"`
+		Sentinel   json.RawMessage `json:"sentinel"`
+	}
+	if err := json.Unmarshal(result, &status); err != nil {
+		return
+	}
+	switch {
+	case status.UnitActive == "active":
+		_, _ = fmt.Fprintln(out, "Stream: active (copying/streaming changes from the source)")
+	case status.Result == "success":
+		_, _ = fmt.Fprintln(out, "Stream: stopped at the end position - ready for `capydb import cutover`")
+	case status.UnitActive == "":
+		_, _ = fmt.Fprintln(out, "Stream: no follow in progress for this project")
+	default:
+		_, _ = fmt.Fprintf(out, "Stream: not running (state %s) - restart with `capydb import --follow` or cancel with `capydb import follow-abort`\n", firstNonEmpty(status.Result, status.UnitActive))
+	}
+	if status.LagBytes != nil {
+		_, _ = fmt.Fprintf(out, "Replication lag: %s behind the source\n", formatBytes(*status.LagBytes))
+	} else {
+		_, _ = fmt.Fprintln(out, "Replication lag: unknown (the base copy may still be running, or the stream has finished)")
+	}
+}
+
+func (a *app) newImportCutoverCommand() *cobra.Command {
+	var projectRef string
+	var confirm bool
+	var wait bool
+	var waitTimeout time.Duration
+	command := &cobra.Command{
+		Use:   "cutover",
+		Short: "Finish a follow import: drain the stream, flip the project live (stop source writers first)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+			if err != nil {
+				return err
+			}
+			project, err := a.resolveProject(ctx, client, projectRef)
+			if err != nil {
+				return err
+			}
+			confirmed, err := confirmProjectDestructiveAction(cmd, project, confirm,
+				"Cutover will REPLACE the live database for project %q (%s) with the imported data.\n")
+			if err != nil {
+				return err
+			}
+			if !confirmed {
+				return fmt.Errorf("cutover not confirmed; pass --confirm or confirm interactively")
+			}
+			job, err := client.ImportFollowCutover(ctx, project.ID)
+			if err != nil {
+				return fmt.Errorf("cutover: %w", err)
+			}
+			if !a.jsonOutput() {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued cutover job %s for project %s\n", job.ID, project.Name)
+			}
+			return a.maybeWaitForJob(cmd, client, job, wait, waitTimeout, "import cutover")
+		},
+	}
+	command.Flags().StringVar(&projectRef, "project", "", "Project id, slug, or name")
+	command.Flags().BoolVar(&confirm, "confirm", false, "Confirm replacing the project's live database with the imported data")
+	addWaitFlags(command, &wait, &waitTimeout, "import cutover")
+	return command
+}
+
+func (a *app) newImportFollowAbortCommand() *cobra.Command {
+	var projectRef string
+	var wait bool
+	var waitTimeout time.Duration
+	command := &cobra.Command{
+		Use:   "follow-abort",
+		Short: "Cancel an in-progress follow import and clean up the source replication slot",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+			if err != nil {
+				return err
+			}
+			project, err := a.resolveProject(ctx, client, projectRef)
+			if err != nil {
+				return err
+			}
+			job, err := client.ImportFollowAbort(ctx, project.ID)
+			if err != nil {
+				return fmt.Errorf("abort follow: %w", err)
+			}
+			return a.maybeWaitForJob(cmd, client, job, wait, waitTimeout, "import follow abort")
+		},
+	}
+	command.Flags().StringVar(&projectRef, "project", "", "Project id, slug, or name")
+	addWaitFlags(command, &wait, &waitTimeout, "import follow abort")
+	return command
+}
+
+// uploadImportDump requests a presigned upload slot for the project, streams
+// the local dump file to it with a progress line on stderr, and returns the
+// object key to start the import with.
+func uploadImportDump(ctx context.Context, stderr io.Writer, client *api.Client, projectID, dumpFile string) (string, error) {
+	upload, err := client.CreateImportUpload(ctx, projectID)
+	if err != nil {
+		return "", fmt.Errorf("request upload URL: %w", err)
+	}
+
+	lastRender := time.Time{}
+	progress := func(sent, total int64) {
+		// Throttle redraws; always render the final 100% line.
+		if time.Since(lastRender) < 200*time.Millisecond && sent < total {
+			return
+		}
+		lastRender = time.Now()
+		percent := int64(100)
+		if total > 0 {
+			percent = sent * 100 / total
+		}
+		_, _ = fmt.Fprintf(stderr, "\rUploading %s... %s / %s (%d%%)", dumpFile, formatBytes(sent), formatBytes(total), percent)
+	}
+
+	if err := client.UploadDump(ctx, upload.UploadURL, dumpFile, progress); err != nil {
+		_, _ = fmt.Fprintln(stderr)
+		return "", fmt.Errorf("upload dump: %w", err)
+	}
+	_, _ = fmt.Fprintln(stderr)
+	return upload.ObjectKey, nil
+}
+
+func (a *app) newImportPreflightCommand() *cobra.Command {
+	var projectRef string
+	var sourceURL string
+
+	command := &cobra.Command{
+		Use:   "preflight",
+		Short: "Check a source database against the project before importing",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if strings.TrimSpace(sourceURL) == "" {
-				return fmt.Errorf("--source-url is required")
+				return usageErrorf("--source-url is required")
 			}
 
 			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
@@ -316,24 +840,86 @@ func (a *app) newImportCommand() *cobra.Command {
 				return err
 			}
 
-			job, err := client.CreateImport(ctx, project.ID, sourceURL, recreate)
+			preflight, err := client.ImportPreflight(ctx, project.ID, sourceURL)
 			if err != nil {
-				return fmt.Errorf("create import: %w", err)
+				return fmt.Errorf("import preflight: %w", err)
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued import job %s for project %s\n", job.ID, project.Name)
-			return maybeWaitForJob(ctx, cmd.OutOrStdout(), client, job, wait, "import")
+
+			if a.jsonOutput() {
+				if err := printJSON(cmd.OutOrStdout(), map[string]any{"preflight": preflight}); err != nil {
+					return err
+				}
+			} else {
+				writeImportPreflight(cmd.OutOrStdout(), preflight)
+			}
+			if !preflight.OK {
+				return fmt.Errorf("import preflight failed; fix the failing checks before running `capydb import`")
+			}
+			return nil
 		},
 	}
 
 	command.Flags().StringVar(&projectRef, "project", "", "Project id, slug, or name")
-	command.Flags().StringVar(&sourceURL, "source-url", "", "Source Postgres connection string")
-	command.Flags().BoolVar(&recreate, "recreate", false, "Recreate the target database before import")
-	command.Flags().BoolVar(&wait, "wait", false, "Wait for the import job to finish")
+	command.Flags().StringVar(&sourceURL, "source-url", "", "Source Postgres connection string (use the provider's direct endpoint - Neon '-pooler' hosts and Supabase's transaction pooler on port 6543 are rejected)")
 	return command
 }
 
+func writeImportPreflight(out io.Writer, preflight api.ImportPreflight) {
+	for _, check := range preflight.Checks {
+		marker := "[" + strings.ToLower(firstNonEmpty(check.Status, "unknown")) + "]"
+		switch strings.ToLower(strings.TrimSpace(check.Status)) {
+		case "pass", "ok", "passed":
+			marker = "[pass]"
+		case "warn", "warning":
+			marker = "[warn]"
+		case "fail", "failed", "error":
+			marker = "[fail]"
+		}
+		if strings.TrimSpace(check.Detail) != "" {
+			_, _ = fmt.Fprintf(out, "%s %s: %s\n", marker, check.Name, check.Detail)
+		} else {
+			_, _ = fmt.Fprintf(out, "%s %s\n", marker, check.Name)
+		}
+	}
+
+	_, _ = fmt.Fprintf(out, "source_version: %s\n", firstNonEmpty(preflight.Source.ServerVersion, "-"))
+	_, _ = fmt.Fprintf(out, "source_size: %s\n", formatBytes(preflight.Source.DatabaseSizeBytes))
+	if len(preflight.Source.Extensions) > 0 {
+		names := make([]string, 0, len(preflight.Source.Extensions))
+		for _, extension := range preflight.Source.Extensions {
+			names = append(names, extension.Name+" "+extension.Version)
+		}
+		_, _ = fmt.Fprintf(out, "source_extensions: %s\n", strings.Join(names, ", "))
+	}
+	if len(preflight.Source.AppSchemas) > 0 {
+		_, _ = fmt.Fprintf(out, "app_schemas_beyond_public: %s\n", strings.Join(preflight.Source.AppSchemas, ", "))
+	}
+	if len(preflight.Source.ProviderSchemas) > 0 {
+		_, _ = fmt.Fprintf(out, "provider_schemas_not_migrated: %s\n", strings.Join(preflight.Source.ProviderSchemas, ", "))
+	}
+	if len(preflight.Source.ProviderAuthFKs) > 0 {
+		refs := make([]string, 0, len(preflight.Source.ProviderAuthFKs))
+		for _, fk := range preflight.Source.ProviderAuthFKs {
+			refs = append(refs, fk.SourceTable+" -> "+fk.TargetTable)
+		}
+		_, _ = fmt.Fprintf(out, "provider_auth_fks: %s\n", strings.Join(refs, ", "))
+	}
+	if len(preflight.Source.ProviderAuthPolicyTables) > 0 {
+		_, _ = fmt.Fprintf(out, "auth_bound_rls_tables: %s\n", strings.Join(preflight.Source.ProviderAuthPolicyTables, ", "))
+	}
+	_, _ = fmt.Fprintf(out, "target_version: %s\n", firstNonEmpty(preflight.TargetVersion, "-"))
+	_, _ = fmt.Fprintf(out, "storage_limit: %s\n", formatBytes(preflight.StorageLimitBytes))
+	if preflight.OK {
+		_, _ = fmt.Fprintln(out, "preflight: ok")
+	} else {
+		_, _ = fmt.Fprintln(out, "preflight: failed")
+	}
+}
+
 func (a *app) newRestoreCommand() *cobra.Command {
+	var allowUnverified bool
 	var backupKey string
+	var confirmFlag bool
 	var confirmProjectOverwrite bool
 	var previewName string
 	var previewRef string
@@ -344,6 +930,7 @@ func (a *app) newRestoreCommand() *cobra.Command {
 	var targetKind string
 	var ttlHours int
 	var wait bool
+	var waitTimeout time.Duration
 
 	command := &cobra.Command{
 		Use:   "restore",
@@ -364,7 +951,7 @@ func (a *app) newRestoreCommand() *cobra.Command {
 				provided++
 			}
 			if provided != 1 {
-				return fmt.Errorf("exactly one of --backup-key, --restore-time, or --restore-point is required")
+				return usageErrorf("exactly one of --backup-key, --restore-time, or --restore-point is required")
 			}
 
 			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
@@ -382,6 +969,7 @@ func (a *app) newRestoreCommand() *cobra.Command {
 			}
 
 			request := api.CreateRestoreRequest{
+				AllowUnverifiedBackup:   allowUnverified,
 				BackupKey:               trimmedBackupKey,
 				ConfirmProjectOverwrite: confirmProjectOverwrite,
 				PreviewName:             strings.TrimSpace(previewName),
@@ -399,13 +987,17 @@ func (a *app) newRestoreCommand() *cobra.Command {
 				request.PreviewID = preview.Preview.ID
 			}
 
+			if resolvedKind == "new_preview" && ttlHours != 0 && (ttlHours < 1 || ttlHours > 168) {
+				return usageErrorf("--ttl-hours must be between 1 and 168")
+			}
+
 			if resolvedKind == "project" {
-				confirmed, err := confirmProjectRestoreOverwrite(cmd, project, confirmProjectOverwrite)
+				confirmed, err := confirmProjectRestoreOverwrite(cmd, project, confirmProjectOverwrite || confirmFlag)
 				if err != nil {
 					return err
 				}
 				if !confirmed {
-					return fmt.Errorf("project overwrite not confirmed; pass --confirm-project-overwrite or confirm interactively")
+					return fmt.Errorf("project overwrite not confirmed; pass --confirm or confirm interactively")
 				}
 				request.ConfirmProjectOverwrite = true
 			}
@@ -414,8 +1006,10 @@ func (a *app) newRestoreCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create restore: %w", err)
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued restore job %s for project %s\n", job.ID, project.Name)
-			return maybeWaitForJob(ctx, cmd.OutOrStdout(), client, job, wait, "restore")
+			if !a.jsonOutput() {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued restore job %s for project %s\n", job.ID, project.Name)
+			}
+			return a.maybeWaitForJob(cmd, client, job, wait, waitTimeout, "restore")
 		},
 	}
 
@@ -427,9 +1021,14 @@ func (a *app) newRestoreCommand() *cobra.Command {
 	command.Flags().StringVar(&previewRef, "preview", "", "Existing preview id or name when target-kind is preview")
 	command.Flags().StringVar(&previewName, "preview-name", "", "Preview name when target-kind is new_preview")
 	command.Flags().IntVar(&ttlHours, "ttl-hours", 0, "Preview TTL in hours when target-kind is new_preview")
+	command.Flags().BoolVar(&confirmFlag, "confirm", false, "Confirm overwriting the project database (target-kind project)")
+	// Deprecated spelling kept as a hidden alias: --confirm is the standard
+	// destructive-confirm flag across capydb commands.
 	command.Flags().BoolVar(&confirmProjectOverwrite, "confirm-project-overwrite", false, "Confirm overwriting the project database")
+	_ = command.Flags().MarkHidden("confirm-project-overwrite")
 	command.Flags().BoolVar(&recreate, "recreate", false, "Recreate the target before restore")
-	command.Flags().BoolVar(&wait, "wait", false, "Wait for the restore job to finish")
+	command.Flags().BoolVar(&allowUnverified, "allow-unverified", false, "Allow restoring from a backup that has not passed verification")
+	addWaitFlags(command, &wait, &waitTimeout, "restore")
 	return command
 }
 
@@ -452,7 +1051,7 @@ func resolveRestoreTargetKind(targetKind, previewRef, previewName string) (strin
 			return "new_preview", nil
 		}
 	default:
-		return "", fmt.Errorf("--target-kind must be one of project, preview, or new_preview")
+		return "", usageErrorf("--target-kind must be one of project, preview, or new_preview")
 	}
 }
 
@@ -461,6 +1060,16 @@ func resolveRestoreTargetKind(targetKind, previewRef, previewName string) (strin
 // an interactive terminal without the flag, the operator is prompted to retype the
 // project name (or "yes") to confirm before the destructive restore is sent.
 func confirmProjectRestoreOverwrite(cmd *cobra.Command, project api.Project, flagConfirmed bool) (bool, error) {
+	return confirmProjectDestructiveAction(cmd, project, flagConfirmed,
+		"This will OVERWRITE the live database for project %q (%s).\n")
+}
+
+// confirmProjectDestructiveAction is the shared typed-name confirmation for
+// actions that overwrite a project's live database. A confirm flag is honoured
+// for non-interactive (CI) usage; on an interactive terminal without the flag,
+// the operator retypes the project name (or "yes"). The warning format takes
+// the project name and id, in that order.
+func confirmProjectDestructiveAction(cmd *cobra.Command, project api.Project, flagConfirmed bool, warningFormat string) (bool, error) {
 	if flagConfirmed {
 		return true, nil
 	}
@@ -468,12 +1077,7 @@ func confirmProjectRestoreOverwrite(cmd *cobra.Command, project api.Project, fla
 		return false, nil
 	}
 
-	_, _ = fmt.Fprintf(
-		cmd.ErrOrStderr(),
-		"This will OVERWRITE the live database for project %q (%s).\n",
-		project.Name,
-		project.ID,
-	)
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), warningFormat, project.Name, project.ID)
 	answer, err := promptLine(fmt.Sprintf("Type the project name %q (or \"yes\") to confirm", project.Name))
 	if err != nil {
 		return false, err
@@ -510,6 +1114,9 @@ func (a *app) newRestorePointsCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("list restore points: %w", err)
 			}
+			if a.jsonOutput() {
+				return printJSON(cmd.OutOrStdout(), map[string]any{"restore_points": jsonList(points)})
+			}
 			if len(points) == 0 {
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No restore points for project %s\n", project.Name)
 				return nil
@@ -532,7 +1139,7 @@ func (a *app) newRestorePointsCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if strings.TrimSpace(createLabel) == "" {
-				return fmt.Errorf("--label is required")
+				return usageErrorf("--label is required")
 			}
 			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
 			if err != nil {
@@ -551,6 +1158,9 @@ func (a *app) newRestorePointsCommand() *cobra.Command {
 			})
 			if err != nil {
 				return fmt.Errorf("create restore point: %w", err)
+			}
+			if a.jsonOutput() {
+				return printJSON(cmd.OutOrStdout(), map[string]any{"restore_point": point})
 			}
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Created restore point %s (%s)\n", point.ID, point.Label)
 			return nil
@@ -571,7 +1181,7 @@ func (a *app) newRestorePointsCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if strings.TrimSpace(deleteRestorePointID) == "" {
-				return fmt.Errorf("--id is required")
+				return usageErrorf("--id is required")
 			}
 			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
 			if err != nil {
@@ -633,6 +1243,7 @@ func (a *app) newJobsCommand() *cobra.Command {
 
 	var jobID string
 	var wait bool
+	var waitTimeout time.Duration
 	getCommand := &cobra.Command{
 		Use:     "get",
 		Aliases: []string{"status"},
@@ -640,7 +1251,7 @@ func (a *app) newJobsCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if strings.TrimSpace(jobID) == "" {
-				return fmt.Errorf("--job-id is required")
+				return usageErrorf("--job-id is required")
 			}
 
 			client, _, err := a.resolveClient(true)
@@ -653,22 +1264,95 @@ func (a *app) newJobsCommand() *cobra.Command {
 				return fmt.Errorf("get job: %w", err)
 			}
 			if wait && !jobDone(job) {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Waiting for job %s\n", job.ID)
-				job, err = waitForJob(ctx, client, job.ID)
+				if !a.jsonOutput() {
+					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Waiting for job %s\n", job.ID)
+				}
+				job, err = waitForJob(ctx, cmd.ErrOrStderr(), client, job.ID, waitTimeout)
 				if err != nil {
 					return err
 				}
 			}
 
-			writeJob(cmd.OutOrStdout(), job)
-			return nil
+			return a.printJob(cmd, job)
 		},
 	}
 	getCommand.Flags().StringVar(&jobID, "job-id", "", "Job id")
 	getCommand.Flags().BoolVar(&wait, "wait", false, "Wait for the job to finish before printing")
+	getCommand.Flags().DurationVar(&waitTimeout, "wait-timeout", defaultWaitTimeout, "Maximum time to wait for the job when --wait is set")
+
+	var listProjectRef string
+	var listLimit int
+	listCommand := &cobra.Command{
+		Use:   "list",
+		Short: "List a project's recent jobs",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			if listLimit < 0 {
+				return usageErrorf("--limit must be zero or positive")
+			}
+
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+			if err != nil {
+				return err
+			}
+			project, err := a.resolveProject(ctx, client, listProjectRef)
+			if err != nil {
+				return err
+			}
+
+			jobs, err := client.ListProjectJobs(ctx, project.ID, listLimit)
+			if err != nil {
+				return fmt.Errorf("list jobs: %w", err)
+			}
+			if a.jsonOutput() {
+				return printJSON(cmd.OutOrStdout(), map[string]any{"jobs": jsonList(jobs)})
+			}
+			if len(jobs) == 0 {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No jobs for project %s\n", project.Name)
+				return nil
+			}
+
+			writer := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 8, 2, ' ', 0)
+			_, _ = fmt.Fprintln(writer, "CREATED_AT\tTYPE\tSTATE\tATTEMPTS\tDURATION\tJOB_ID")
+			for _, job := range jobs {
+				_, _ = fmt.Fprintf(
+					writer,
+					"%s\t%s\t%s\t%d/%d\t%s\t%s\n",
+					formatTime(job.CreatedAt),
+					jobTypeLabel(job.Type),
+					job.State,
+					max(job.Attempts, 1),
+					job.MaxAttempts,
+					formatJobDuration(job),
+					job.ID,
+				)
+			}
+			return writer.Flush()
+		},
+	}
+	listCommand.Flags().StringVar(&listProjectRef, "project", "", "Project id, slug, or name")
+	listCommand.Flags().IntVar(&listLimit, "limit", 0, "Maximum number of jobs to return (server default when omitted)")
 
 	command.AddCommand(getCommand)
+	command.AddCommand(listCommand)
 	return command
+}
+
+// formatJobDuration renders a terminal job's wall-clock duration, or "-" for
+// jobs that never started/finished.
+func formatJobDuration(job api.Job) string {
+	start := job.CreatedAt
+	if job.StartedAt != nil {
+		start = *job.StartedAt
+	}
+	if job.CompletedAt == nil {
+		if job.State == "running" || job.State == "pending" {
+			return time.Since(start).Round(time.Second).String()
+		}
+		return "-"
+	}
+	return job.CompletedAt.Sub(start).Round(time.Second).String()
 }
 
 func (a *app) newStudioCommand() *cobra.Command {
@@ -712,7 +1396,13 @@ func (a *app) newStudioCommand() *cobra.Command {
 				return err
 			}
 
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), rawURL)
+			if a.jsonOutput() {
+				if err := printJSON(cmd.OutOrStdout(), map[string]string{"url": rawURL}); err != nil {
+					return err
+				}
+			} else {
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), rawURL)
+			}
 			if printOnly {
 				return nil
 			}
@@ -735,7 +1425,10 @@ func (a *app) resolveClient(prompt bool, fallbackAPIURL ...string) (*api.Client,
 		return nil, resolvedAuth{}, err
 	}
 
-	client := api.NewClient(authConfig.APIURL, authConfig.APIKey)
+	client, err := a.newAPIClient(authConfig.APIURL, authConfig.APIKey)
+	if err != nil {
+		return nil, resolvedAuth{}, err
+	}
 	if err := a.persistResolvedAuth(authConfig); err != nil {
 		return nil, resolvedAuth{}, err
 	}
@@ -798,7 +1491,7 @@ func (a *app) resolveProject(ctx context.Context, client *api.Client, ref string
 
 	switch len(matches) {
 	case 0:
-		return api.Project{}, fmt.Errorf("project %q not found", trimmed)
+		return api.Project{}, notFoundErrorf("project %q not found", trimmed)
 	case 1:
 		return matches[0], nil
 	default:
@@ -838,7 +1531,7 @@ func (a *app) resolvePreview(ctx context.Context, client *api.Client, projectID,
 
 	switch len(matches) {
 	case 0:
-		return api.PreviewDetails{}, fmt.Errorf("preview %q not found", trimmed)
+		return api.PreviewDetails{}, notFoundErrorf("preview %q not found", trimmed)
 	case 1:
 		return matches[0], nil
 	default:
@@ -854,8 +1547,10 @@ func (a *app) resolveAppURL(apiURL string) string {
 		return strings.TrimRight(value, "/")
 	}
 	userConfig, err := config.LoadUserConfig()
-	if err == nil && strings.TrimSpace(userConfig.AppURL) != "" {
-		return strings.TrimRight(strings.TrimSpace(userConfig.AppURL), "/")
+	if err == nil {
+		if _, entry, ok := userConfig.Active(); ok && strings.TrimSpace(entry.AppURL) != "" {
+			return strings.TrimRight(strings.TrimSpace(entry.AppURL), "/")
+		}
 	}
 	apiURL = strings.TrimRight(strings.TrimSpace(apiURL), "/")
 	if trimmed, ok := strings.CutSuffix(apiURL, "/api/capydb"); ok {
@@ -877,23 +1572,47 @@ func buildDashboardURL(appURL, projectID, page string) (string, error) {
 	case "connections", "studio", "previews", "backups", "settings":
 		return appURL + basePath + "/" + strings.ToLower(strings.TrimSpace(page)), nil
 	default:
-		return "", fmt.Errorf("page must be one of overview, connections, studio, previews, backups, or settings")
+		return "", usageErrorf("page must be one of overview, connections, studio, previews, backups, or settings")
 	}
 }
 
-func maybeWaitForJob(ctx context.Context, out io.Writer, client *api.Client, job api.Job, wait bool, action string) error {
-	writeJob(out, job)
+// addWaitFlags registers the paired --wait / --wait-timeout flags used by every
+// command that queues an async job.
+func addWaitFlags(command *cobra.Command, wait *bool, waitTimeout *time.Duration, action string) {
+	command.Flags().BoolVar(wait, "wait", false, "Wait for the "+action+" job to finish")
+	command.Flags().DurationVar(waitTimeout, "wait-timeout", defaultWaitTimeout, "Maximum time to wait for the job when --wait is set")
+}
+
+func (a *app) maybeWaitForJob(cmd *cobra.Command, client *api.Client, job api.Job, wait bool, waitTimeout time.Duration, action string) error {
+	ctx := cmd.Context()
+	out := cmd.OutOrStdout()
+	errOut := cmd.ErrOrStderr()
+
 	if !wait || job.ID == "" || jobDone(job) {
-		return nil
+		return a.printJob(cmd, job)
 	}
 
-	_, _ = fmt.Fprintf(out, "Waiting for job %s\n", job.ID)
-	job, err := waitForJob(ctx, client, job.ID)
+	if !a.jsonOutput() {
+		_ = a.printJob(cmd, job)
+		_, _ = fmt.Fprintf(out, "Waiting for job %s\n", job.ID)
+	}
+	job, err := waitForJob(ctx, errOut, client, job.ID, waitTimeout)
 	if err != nil {
 		return err
 	}
-	writeJob(out, job)
+	if err := a.printJob(cmd, job); err != nil {
+		return err
+	}
 	return ensureCompletedJob(job, action)
+}
+
+// printJob renders a job to stdout, as JSON in JSON output mode.
+func (a *app) printJob(cmd *cobra.Command, job api.Job) error {
+	if a.jsonOutput() {
+		return printJSON(cmd.OutOrStdout(), job)
+	}
+	writeJob(cmd.OutOrStdout(), job)
+	return nil
 }
 
 func ensureCompletedJob(job api.Job, action string) error {
@@ -948,9 +1667,58 @@ func writeBackupTable(out io.Writer, backups []api.Backup) {
 	_ = writer.Flush()
 }
 
+// jobTypeLabels maps internal job-kind tokens to the customer-facing action
+// labels used across every surface (mirrors frontend display.ts). Text output
+// must never print raw kinds like "instance.create" or "branch.create"; JSON
+// output keeps the raw API values for machines.
+var jobTypeLabels = map[string]string{
+	"project.apply_plan":            "Applying configuration",
+	"project.backup":                "Creating backup",
+	"project.backup_delete":         "Deleting backup",
+	"project.import":                "Importing data",
+	"project.import_follow_start":   "Starting live import",
+	"project.import_follow_status":  "Checking import progress",
+	"project.import_follow_cutover": "Finalizing import",
+	"project.import_follow_abort":   "Canceling import",
+	"project.restore":               "Restoring database",
+	"project.rotate_credentials":    "Rotating credentials",
+	"project.promote_preview":       "Promoting preview",
+	"project.extension_enable":      "Enabling extension",
+	"project.extension_disable":     "Disabling extension",
+	"integration.sync_env":          "Syncing environment variables",
+	"integration.clerk_backfill":    "Syncing account",
+	"instance.create":               "Provisioning database",
+	"instance.destroy":              "Deleting database",
+	"instance.sleep":                "Pausing database",
+	"instance.wake":                 "Resuming database",
+	"instance.seed_standby":         "Setting up replication",
+	"instance.pitr_restore":         "Restoring to point in time",
+	"instance.set_readonly":         "Updating database access mode",
+	"branch.create":                 "Creating preview",
+	"host.health_probe":             "Health check",
+}
+
+// jobTypeLabel converts an internal job kind into its customer-facing label,
+// falling back to a readable sentence-cased form for unknown kinds.
+func jobTypeLabel(jobType string) string {
+	trimmed := strings.TrimSpace(jobType)
+	if trimmed == "" {
+		return "-"
+	}
+	if label, ok := jobTypeLabels[trimmed]; ok {
+		return label
+	}
+	words := strings.Fields(strings.NewReplacer(".", " ", "_", " ", "-", " ").Replace(trimmed))
+	if len(words) == 0 {
+		return trimmed
+	}
+	sentence := strings.ToLower(strings.Join(words, " "))
+	return strings.ToUpper(sentence[:1]) + sentence[1:]
+}
+
 func writeJob(out io.Writer, job api.Job) {
 	_, _ = fmt.Fprintf(out, "job_id: %s\n", job.ID)
-	_, _ = fmt.Fprintf(out, "type: %s\n", firstNonEmpty(job.Type, "-"))
+	_, _ = fmt.Fprintf(out, "type: %s\n", jobTypeLabel(job.Type))
 	_, _ = fmt.Fprintf(out, "state: %s\n", firstNonEmpty(job.State, "-"))
 	if strings.TrimSpace(job.ProjectID) != "" {
 		_, _ = fmt.Fprintf(out, "project_id: %s\n", job.ProjectID)
