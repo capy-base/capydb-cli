@@ -119,6 +119,59 @@ const db = postgres(url);
 	}
 }
 
+func TestDetectPoolerStartupParams(t *testing.T) {
+	input := `import postgres from "postgres";
+const sql = postgres(url, {
+  prepare: false,
+  connection: { statement_timeout: 10_000, application_name: "app" },
+});
+const pool = new Pool({ options: '-c search_path=tenant' });
+`
+	report := codemodReport{}
+	detectPoolerStartupParams("src/db.ts", input, &report)
+
+	if len(report.Changes) != 0 {
+		t.Errorf("detection must be warn-only, got changes: %+v", report.Changes)
+	}
+	joined := ""
+	for _, note := range report.Manual {
+		joined += note.Reason + "\n"
+	}
+	if !strings.Contains(joined, "connection.statement_timeout") || !strings.Contains(joined, "never applies it") {
+		t.Errorf("missing ignored-GUC warning, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "ALTER ROLE") {
+		t.Errorf("warning must carry the ALTER ROLE remediation, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "-c search_path") {
+		t.Errorf("missing libpq options warning, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "application_name") {
+		t.Errorf("application_name is pooler-tracked and must not warn, got:\n%s", joined)
+	}
+}
+
+func TestDetectPoolerStartupParamsRejectedGUC(t *testing.T) {
+	input := `const sql = postgres(url, { connection: { search_path: "tenant_42" } });`
+	report := codemodReport{}
+	detectPoolerStartupParams("src/db.ts", input, &report)
+	if len(report.Manual) != 1 {
+		t.Fatalf("want 1 note, got %+v", report.Manual)
+	}
+	if !strings.Contains(report.Manual[0].Reason, "08P01") {
+		t.Errorf("rejected GUC must mention the handshake failure, got: %s", report.Manual[0].Reason)
+	}
+}
+
+func TestDetectPoolerStartupParamsEnvDSN(t *testing.T) {
+	input := "DATABASE_URL=postgresql://u:p@x.db.capydb.dev:6432/db?sslmode=require&options=-c%20statement_timeout=5000\n"
+	report := codemodReport{}
+	detectPoolerStartupParams(".env", input, &report)
+	if len(report.Manual) != 1 || !strings.Contains(report.Manual[0].Reason, "statement_timeout") {
+		t.Errorf("DSN options GUC not flagged: %+v", report.Manual)
+	}
+}
+
 func TestSwapNeonPackageJSON(t *testing.T) {
 	input := `{
   "dependencies": {

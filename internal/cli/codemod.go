@@ -142,6 +142,11 @@ func runNeonCodemod(root string, write bool) (codemodReport, error) {
 		}
 		content := string(raw)
 		rewritten := transform(path, content, &report)
+		// Startup-parameter GUCs are a hazard regardless of which provider the
+		// code came from, so this check is not gated on Neon usage.
+		if name != "package.json" {
+			detectPoolerStartupParams(path, content, &report)
+		}
 		if rewritten != content && write {
 			info, err := entry.Info()
 			if err != nil {
@@ -204,7 +209,33 @@ var (
 	drizzleURLPattern = regexp.MustCompile(`process\.env\.DATABASE_URL!?`)
 	// channel_binding=require connection parameter in env files.
 	channelBindingPattern = regexp.MustCompile(`([?&])channel_binding=require&?`)
+	// Per-connection GUCs handed to the driver as wire startup parameters
+	// (2026-07-22 ermisai incident). Through the transaction pooler these never
+	// work: the timeout family is accepted but silently ignored, anything else
+	// is rejected at handshake (08P01), refusing every pooled connection.
+	// postgres-js: postgres(url, { connection: { statement_timeout: ... } }).
+	postgresJSConnectionGUCPattern = regexp.MustCompile(`connection\s*:\s*\{[^}]*?\b(statement_timeout|idle_in_transaction_session_timeout|lock_timeout|idle_session_timeout|search_path|default_transaction_[a-z_]+|application_name)\b`)
+	// node-postgres/libpq: options: '-c statement_timeout=10000'.
+	libpqOptionsGUCPattern = regexp.MustCompile(`\boptions\s*:\s*['"` + "`" + `]\s*-c\s+([A-Za-z_]+)`)
+	// DSN query form in env files or inline URLs: ?options=-c%20statement_timeout=...
+	dsnOptionsGUCPattern = regexp.MustCompile(`[?&]options=-c(?:%20|\+| )([A-Za-z_]+)`)
 )
+
+// The GUCs CapyDB's pooler accepts at startup but never applies (its
+// ignore_startup_parameters list, minus the protocol-level entries). KEEP IN
+// LOCKSTEP with capydb-pool-sync.sh.j2 (infrastructure) and
+// POOLER_IGNORED_STARTUP_PARAMS in @capydb/drizzle.
+var poolerIgnoredStartupGUCs = map[string]struct{}{
+	"statement_timeout":                   {},
+	"idle_in_transaction_session_timeout": {},
+	"lock_timeout":                        {},
+	"idle_session_timeout":                {},
+}
+
+// Startup parameters PgBouncer tracks and replays per client - safe to send.
+var poolerTrackedStartupGUCs = map[string]struct{}{
+	"application_name": {},
+}
 
 func codemodSourceFile(path, content string, report *codemodReport) string {
 	if !strings.Contains(content, "@neondatabase/serverless") &&
@@ -395,6 +426,40 @@ func codemodEnvFile(path, content string, report *codemodReport) string {
 		})
 	}
 	return rewritten
+}
+
+// detectPoolerStartupParams flags driver configs that send per-connection GUCs
+// as wire startup parameters, which never work through CapyDB's transaction
+// pooler (:6432): the timeout family is accepted but silently ignored, and
+// anything else is rejected at handshake (08P01), refusing every pooled
+// connection. Warn-only - the fix (ALTER ROLE ... SET, or moving the setting
+// to the direct URL) needs human judgment, never a rewrite.
+func detectPoolerStartupParams(path, content string, report *codemodReport) {
+	for _, m := range postgresJSConnectionGUCPattern.FindAllStringSubmatchIndex(content, -1) {
+		guc := content[m[2]:m[3]]
+		if _, tracked := poolerTrackedStartupGUCs[guc]; tracked {
+			continue
+		}
+		line := strings.Count(content[:m[0]], "\n") + 1
+		var reason string
+		if _, ignored := poolerIgnoredStartupGUCs[guc]; ignored {
+			reason = fmt.Sprintf("connection.%s is sent as a wire startup parameter; CapyDB's pooled endpoint (:6432) accepts it but never applies it - set it durably with ALTER ROLE <role> SET %s = <value> (run once on the direct URL) and remove it here", guc, guc)
+		} else {
+			reason = fmt.Sprintf("connection.%s is sent as a wire startup parameter, which CapyDB's pooled endpoint (:6432) rejects at handshake (08P01 unsupported startup parameter) - every pooled connection would fail; set it with ALTER ROLE <role> SET %s = <value> or use the direct :5432 URL", guc, guc)
+		}
+		report.Manual = append(report.Manual, codemodNote{File: path, Line: line, Reason: reason})
+	}
+	for _, pattern := range []*regexp.Regexp{libpqOptionsGUCPattern, dsnOptionsGUCPattern} {
+		for _, m := range pattern.FindAllStringSubmatchIndex(content, -1) {
+			guc := content[m[2]:m[3]]
+			line := strings.Count(content[:m[0]], "\n") + 1
+			report.Manual = append(report.Manual, codemodNote{
+				File:   path,
+				Line:   line,
+				Reason: fmt.Sprintf("the options startup parameter is accepted but wholly ignored by CapyDB's pooled endpoint (:6432), so -c %s never takes effect; set it with ALTER ROLE <role> SET %s = <value> or use the direct :5432 URL", guc, guc),
+			})
+		}
+	}
 }
 
 // findLines returns the 1-indexed line numbers containing needle.
