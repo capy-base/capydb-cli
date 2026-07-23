@@ -3,6 +3,7 @@ package scan
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -128,4 +129,104 @@ func TestScanConsumersGate(t *testing.T) {
 	if len(consumers) != 1 || consumers[0] != "app-b" {
 		t.Errorf("consumers = %v, want [app-b]", consumers)
 	}
+}
+
+// TestScanEnvShadowing reproduces the press-hub failure (2026-07-23): the CLI
+// wrote CapyDB's URLs to .env.local while .env kept the old local database, and
+// drizzle.config.ts + the import script both pin .env - so schema and ingest
+// work silently targeted the old database while the app used the new one.
+func TestScanEnvShadowing(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".env", "DATABASE_URL='postgres://postgres:dev@localhost:55432/presshub'\n")
+	writeFile(t, root, ".env.local", `DATABASE_URL="postgres://u:p@press-hub-da3684.db.capydb.dev:6432/db?sslmode=require"`+"\n")
+	// Placeholders must never count as a competing definition.
+	writeFile(t, root, ".env.example", "DATABASE_URL='postgres://USER:PASSWORD@SLUG.db.capydb.dev:6432/DB?sslmode=require'\n")
+	writeFile(t, root, "drizzle.config.ts", "import { config } from \"dotenv\";\nconfig({ path: \".env\" });\n")
+	writeFile(t, root, "package.json", `{"dependencies":{"drizzle-orm":"1.0.0","postgres":"3.4.9"}}`)
+	writeFile(t, root, "pnpm-lock.yaml", "lockfileVersion: 9\n")
+
+	report, err := Run(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(report.EnvConflicts) != 1 {
+		t.Fatalf("expected 1 env conflict, got %d: %+v", len(report.EnvConflicts), report.EnvConflicts)
+	}
+	conflict := report.EnvConflicts[0]
+	if conflict.Key != "DATABASE_URL" {
+		t.Errorf("conflict key = %q, want DATABASE_URL", conflict.Key)
+	}
+	// .env and .env.local only - .env.example is excluded.
+	if len(conflict.Assignments) != 2 {
+		t.Fatalf("expected 2 assignments, got %+v", conflict.Assignments)
+	}
+	for _, assignment := range conflict.Assignments {
+		if assignment.File == ".env.example" {
+			t.Error("placeholder env file must not count as a conflicting definition")
+		}
+	}
+
+	if len(report.Repo.EnvLoaders) != 1 || report.Repo.EnvLoaders[0].PinnedPath != ".env" {
+		t.Fatalf("expected drizzle.config.ts to be recorded as pinning .env, got %+v", report.Repo.EnvLoaders)
+	}
+
+	var shadowWarning string
+	for _, warning := range report.Scenario.Warnings {
+		if len(warning) > 14 && warning[:14] == "ENV SHADOWING:" {
+			shadowWarning = warning
+		}
+	}
+	if shadowWarning == "" {
+		t.Fatalf("expected an ENV SHADOWING warning, got %+v", report.Scenario.Warnings)
+	}
+	// The warning must name the loader that gets misrouted, not just the keys.
+	if !contains(shadowWarning, "drizzle.config.ts") {
+		t.Errorf("warning should name the path-pinned loader, got %q", shadowWarning)
+	}
+}
+
+// TestScanNoEnvShadowingWhenOneFileOwnsCredentials is the fixed press-hub shape:
+// one file owns the database vars, and loaders may pin several files safely.
+func TestScanNoEnvShadowingWhenOneFileOwnsCredentials(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".env", "NEXT_PUBLIC_APP_URL=http://localhost:3001\n")
+	writeFile(t, root, ".env.local", `DATABASE_URL="postgres://u:p@press-hub-da3684.db.capydb.dev:6432/db?sslmode=require"`+"\n")
+	writeFile(t, root, "drizzle.config.ts", "config({ path: \".env.local\" });\nconfig({ path: \".env\" });\n")
+	writeFile(t, root, "package.json", `{"dependencies":{"postgres":"3.4.9"}}`)
+	writeFile(t, root, "pnpm-lock.yaml", "lockfileVersion: 9\n")
+
+	report, err := Run(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.EnvConflicts) != 0 {
+		t.Fatalf("expected no conflicts, got %+v", report.EnvConflicts)
+	}
+}
+
+// TestDetectEnvConflictsStandalone covers the cheap path used by link/create
+// and doctor, which never parses source files.
+func TestDetectEnvConflictsStandalone(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".env", "DATABASE_URL=postgres://u:p@old.neon.tech:5432/db\n")
+	writeFile(t, root, ".env.production", "DATABASE_URL=postgres://u:p@new-a1b2c3.db.capydb.dev:6432/db\n")
+
+	conflicts, err := DetectEnvConflicts(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conflicts) != 1 {
+		t.Fatalf("expected 1 conflict, got %+v", conflicts)
+	}
+	described := conflicts[0].Describe()
+	for _, want := range []string{"DATABASE_URL", ".env", ".env.production", "old.neon.tech"} {
+		if !contains(described, want) {
+			t.Errorf("Describe() = %q, missing %q", described, want)
+		}
+	}
+}
+
+func contains(haystack, needle string) bool {
+	return len(haystack) >= len(needle) && strings.Contains(haystack, needle)
 }

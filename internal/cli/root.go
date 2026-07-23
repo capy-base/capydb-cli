@@ -24,6 +24,7 @@ import (
 	"github.com/capy-base/capydb/cli/internal/exitcode"
 	"github.com/capy-base/capydb/cli/internal/gitignore"
 	"github.com/capy-base/capydb/cli/internal/project"
+	"github.com/capy-base/capydb/cli/internal/scan"
 )
 
 type app struct {
@@ -866,7 +867,32 @@ func (a *app) writeProjectEnv(cmd *cobra.Command, client *api.Client, projectID 
 	if err := gitignore.EnsureLocalConfigIgnored(a.cwd, envIgnore); err != nil {
 		return err
 	}
+
+	warnEnvShadowing(cmd, a.cwd, envPath)
 	return nil
+}
+
+// warnEnvShadowing reports env keys that now point at two different databases.
+//
+// The env file this command just wrote is only one of several a repo carries,
+// and the conflict resolver above only sees that one file. A leftover
+// DATABASE_URL in a sibling file does not surface as an error anywhere: the
+// framework picks one file by precedence while tools that pin a path
+// (drizzle.config.ts, seed scripts) pick another, so the app can run on CapyDB
+// while migrations still write to the old provider. Surfacing it at write time
+// is the only moment the user is already thinking about env files.
+func warnEnvShadowing(cmd *cobra.Command, root, writtenEnvPath string) {
+	conflicts, err := scan.DetectEnvConflicts(root)
+	if err != nil || len(conflicts) == 0 {
+		return
+	}
+	errOut := cmd.ErrOrStderr()
+	_, _ = fmt.Fprintf(errOut, "\nwarning: %d env key(s) point at different databases in different files:\n", len(conflicts))
+	for _, conflict := range conflicts {
+		_, _ = fmt.Fprintf(errOut, "  - %s\n", conflict.Describe())
+	}
+	_, _ = fmt.Fprintf(errOut, "CapyDB wrote %s. Remove the database vars from the other file(s) so one file owns them,\n", writtenEnvPath)
+	_, _ = fmt.Fprintln(errOut, "and check anything calling dotenv/load_dotenv with an explicit path: `capydb migrate scan` lists those.")
 }
 
 // envIgnoreEntry resolves the .gitignore entry for the env file the CLI writes,

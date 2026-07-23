@@ -22,10 +22,39 @@ import (
 // Report is the scan's full result. Databases is the primary output: the unit
 // of cutover is the database, not the repo.
 type Report struct {
-	Path      string     `json:"path"`
-	Databases []Database `json:"databases"`
-	Repo      RepoFacts  `json:"repo"`
-	Scenario  Scenario   `json:"scenario"`
+	Path         string        `json:"path"`
+	Databases    []Database    `json:"databases"`
+	EnvConflicts []EnvConflict `json:"env_conflicts"`
+	Repo         RepoFacts     `json:"repo"`
+	Scenario     Scenario      `json:"scenario"`
+}
+
+// EnvAssignment is one env file's database value for a single env key.
+type EnvAssignment struct {
+	File     string `json:"file"`
+	Hostname string `json:"hostname"`
+	Provider string `json:"provider"`
+}
+
+// EnvConflict is one env key that points at DIFFERENT databases in different
+// env files.
+//
+// This is the shadowing failure, and it is silent by construction: the
+// framework resolves one file (Next: .env.local over .env) while any tool that
+// pins a path - `dotenv.config({ path: ".env" })`, `load_dotenv(".env")` -
+// resolves another. The app can therefore run against the new database while
+// migrations, seeds and ingest scripts still write to the old one, with nothing
+// reporting an error. Observed on press-hub 2026-07-23.
+type EnvConflict struct {
+	Key         string          `json:"key"`
+	Assignments []EnvAssignment `json:"assignments"`
+}
+
+// EnvLoader is a source file that loads one specific env file by path, thereby
+// opting out of the framework's env precedence.
+type EnvLoader struct {
+	File       string `json:"file"`
+	PinnedPath string `json:"pinned_path"`
 }
 
 // Database is one distinct database hostname the repo references.
@@ -40,14 +69,20 @@ type Database struct {
 
 // RepoFacts are the axis-B/C classification inputs plus the hygiene gate.
 type RepoFacts struct {
-	AuthSystems    []string  `json:"auth_systems"`
-	DataLayers     []string  `json:"data_layers"`
-	CallSites      CallSites `json:"call_sites"`
-	DistTagPins    []string  `json:"dist_tag_pins"` // "pkg@tag" - moving pointers; lockfile regen imports drift
-	EnvFiles       []string  `json:"env_files"`
-	Lockfiles      []string  `json:"lockfiles"`
-	PackageDirs    []string  `json:"package_dirs"`
-	SupabaseAssets Supabase  `json:"supabase_assets"`
+	AuthSystems []string    `json:"auth_systems"`
+	DataLayers  []string    `json:"data_layers"`
+	CallSites   CallSites   `json:"call_sites"`
+	DistTagPins []string    `json:"dist_tag_pins"` // "pkg@tag" - moving pointers; lockfile regen imports drift
+	EnvFiles    []string    `json:"env_files"`
+	EnvLoaders  []EnvLoader `json:"env_loaders"` // source files pinning a specific env path
+
+	// DrizzleSchemaFilter reports whether a drizzle config already scopes
+	// drizzle-kit to specific schemas.
+	DrizzleSchemaFilter bool `json:"drizzle_schema_filter"`
+
+	Lockfiles      []string `json:"lockfiles"`
+	PackageDirs    []string `json:"package_dirs"`
+	SupabaseAssets Supabase `json:"supabase_assets"`
 }
 
 // CallSites counts provider-coupled call sites per KIND - dependency presence
@@ -102,7 +137,27 @@ var (
 	supabaseRealtimePattern = regexp.MustCompile(`\.channel\s*\(|postgres_changes`)
 	neonImportPattern       = regexp.MustCompile(`@neondatabase/serverless|drizzle-orm/neon-`)
 	neonBatchPattern        = regexp.MustCompile(`\bdb\s*\.\s*batch\s*\(|\bsql\s*\.\s*transaction\s*\(\s*\[`)
+
+	// Loaders that pin ONE env file, bypassing the framework's precedence:
+	// dotenv `config({ path: "..." })`, python-dotenv `load_dotenv("...")`,
+	// godotenv `Load("...")`.
+	dotenvPathPattern   = regexp.MustCompile(`config\s*\(\s*\{[^}]*?path\s*:\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `]`)
+	pyDotenvPathPattern = regexp.MustCompile(`load_dotenv\s*\(\s*(?:dotenv_path\s*=\s*)?['"]([^'"]+)['"]`)
+	goDotenvPathPattern = regexp.MustCompile(`godotenv\.(?:Load|Overload)\s*\(\s*"([^"]+)"`)
 )
+
+// isExampleEnvFile reports whether an env file holds placeholders rather than
+// real values. Their values are deliberately fake (`SLUG.db.capydb.dev`) and
+// must never count as a conflicting definition.
+func isExampleEnvFile(name string) bool {
+	base := strings.ToLower(filepath.Base(name))
+	for _, marker := range []string{"example", "sample", "template", "dist", "defaults"} {
+		if strings.Contains(base, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 // interestingDeps maps dependency names to the classification they signal.
 var authDeps = map[string]string{
@@ -136,6 +191,7 @@ func Run(root, portfolioDir string) (Report, error) {
 
 	databasesByHost := map[string]*Database{}
 	supabaseRefs := map[string]bool{}
+	envAssignments := map[string][]EnvAssignment{}
 
 	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -157,6 +213,7 @@ func Run(root, portfolioDir string) (Report, error) {
 		case name == ".env" || strings.HasPrefix(name, ".env."):
 			report.Repo.EnvFiles = append(report.Repo.EnvFiles, relative)
 			scanEnvFile(path, relative, databasesByHost, supabaseRefs)
+			collectEnvAssignments(path, relative, envAssignments)
 		case name == "package.json":
 			report.Repo.PackageDirs = append(report.Repo.PackageDirs, filepath.Dir(relative))
 			scanPackageJSON(path, &report.Repo)
@@ -169,7 +226,7 @@ func Run(root, portfolioDir string) (Report, error) {
 		}
 
 		if sourceExtensions[filepath.Ext(name)] {
-			scanSourceFile(path, relative, &report.Repo.CallSites)
+			scanSourceFile(path, relative, &report.Repo)
 		}
 		if strings.Contains(relative, "supabase"+string(filepath.Separator)+"migrations") && strings.HasSuffix(name, ".sql") {
 			report.Repo.SupabaseAssets.MigrationFiles++
@@ -219,9 +276,118 @@ func Run(root, portfolioDir string) (Report, error) {
 	}
 	sort.Slice(report.Databases, func(i, j int) bool { return report.Databases[i].Hostname < report.Databases[j].Hostname })
 
+	report.EnvConflicts = conflictsFrom(envAssignments)
+
 	normalizeRepoFacts(&report.Repo)
 	report.Scenario = deriveScenario(report)
 	return report, nil
+}
+
+// DetectEnvConflicts walks only the repo's env files and returns every env key
+// that resolves to more than one database. It is deliberately cheap (no source
+// parsing, no network) so `link`, `create` and `doctor` can all afford to call
+// it inline.
+func DetectEnvConflicts(root string) ([]EnvConflict, error) {
+	assignments := map[string][]EnvAssignment{}
+	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if skipDirs[entry.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := entry.Name()
+		if name != ".env" && !strings.HasPrefix(name, ".env.") {
+			return nil
+		}
+		relative, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			relative = path
+		}
+		collectEnvAssignments(path, relative, assignments)
+		return nil
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	return conflictsFrom(assignments), nil
+}
+
+// collectEnvAssignments records key -> (file, host) for one env file. Example
+// files are skipped: their placeholder hosts are not real definitions.
+func collectEnvAssignments(path, relative string, assignments map[string][]EnvAssignment) {
+	if isExampleEnvFile(relative) {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		keyMatch := envKeyPattern.FindStringSubmatch(line)
+		urlMatch := postgresURLPattern.FindStringSubmatch(trimmed)
+		if keyMatch == nil || urlMatch == nil {
+			continue
+		}
+		key, host := keyMatch[1], urlMatch[1]
+		assignments[key] = append(assignments[key], EnvAssignment{
+			File: relative, Hostname: host, Provider: classifyHost(host),
+		})
+	}
+}
+
+// conflictsFrom keeps only keys whose assignments disagree on the hostname.
+func conflictsFrom(assignments map[string][]EnvAssignment) []EnvConflict {
+	conflicts := []EnvConflict{}
+	for key, entries := range assignments {
+		hosts := map[string]bool{}
+		for _, entry := range entries {
+			hosts[entry.Hostname] = true
+		}
+		if len(hosts) < 2 {
+			continue
+		}
+		sorted := append([]EnvAssignment(nil), entries...)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].File < sorted[j].File })
+		conflicts = append(conflicts, EnvConflict{Key: key, Assignments: sorted})
+	}
+	sort.Slice(conflicts, func(i, j int) bool { return conflicts[i].Key < conflicts[j].Key })
+	return conflicts
+}
+
+// pinnedLoadersFor returns "file (pins <env file>)" for every loader that pins
+// one of the env files taking part in a conflict - i.e. the tools that will
+// silently resolve the losing value.
+func pinnedLoadersFor(loaders []EnvLoader, conflict EnvConflict) []string {
+	involved := map[string]bool{}
+	for _, assignment := range conflict.Assignments {
+		involved[filepath.Base(assignment.File)] = true
+	}
+	pins := []string{}
+	for _, loader := range loaders {
+		if involved[filepath.Base(loader.PinnedPath)] {
+			pins = append(pins, fmt.Sprintf("%s (pins %s)", loader.File, loader.PinnedPath))
+		}
+	}
+	sort.Strings(pins)
+	return dedupe(pins)
+}
+
+// Describe renders a conflict as a single actionable line.
+func (c EnvConflict) Describe() string {
+	parts := make([]string, 0, len(c.Assignments))
+	for _, assignment := range c.Assignments {
+		parts = append(parts, fmt.Sprintf("%s -> %s", assignment.File, assignment.Hostname))
+	}
+	return fmt.Sprintf("%s is defined in %d env files with different databases (%s)",
+		c.Key, len(c.Assignments), strings.Join(parts, ", "))
 }
 
 func scanEnvFile(path, relative string, databases map[string]*Database, supabaseRefs map[string]bool) {
@@ -351,7 +517,7 @@ func scanPythonDeps(path string, facts *RepoFacts) {
 	}
 }
 
-func scanSourceFile(path, relative string, sites *CallSites) {
+func scanSourceFile(path, relative string, facts *RepoFacts) {
 	info, err := os.Stat(path)
 	if err != nil || info.Size() > maxSourceFileBytes {
 		return
@@ -361,6 +527,25 @@ func scanSourceFile(path, relative string, sites *CallSites) {
 		return
 	}
 	content := string(data)
+
+	// Env loaders that pin a path opt out of the framework's precedence, which
+	// is what makes a duplicate DATABASE_URL dangerous rather than merely
+	// untidy. Record every pin so a conflict can name the tools it misroutes.
+	for _, pattern := range []*regexp.Regexp{dotenvPathPattern, pyDotenvPathPattern, goDotenvPathPattern} {
+		for _, match := range pattern.FindAllStringSubmatch(content, -1) {
+			pinned := strings.TrimSpace(match[1])
+			if pinned == "" || !strings.Contains(filepath.Base(pinned), ".env") {
+				continue
+			}
+			facts.EnvLoaders = append(facts.EnvLoaders, EnvLoader{File: relative, PinnedPath: pinned})
+		}
+	}
+
+	if strings.HasPrefix(filepath.Base(relative), "drizzle.config.") && strings.Contains(content, "schemaFilter") {
+		facts.DrizzleSchemaFilter = true
+	}
+
+	sites := &facts.CallSites
 	sites.SupabaseData += len(supabaseDataPattern.FindAllStringIndex(content, -1))
 	sites.SupabaseAuth += len(supabaseAuthPattern.FindAllStringIndex(content, -1))
 	sites.SupabaseStorage += len(supabaseStoragePattern.FindAllStringIndex(content, -1))
@@ -568,12 +753,25 @@ func deriveScenario(report Report) Scenario {
 			scenario.Warnings = append(scenario.Warnings, database.Hostname+" is also referenced by: "+strings.Join(database.Consumers, ", ")+" - the cutover must swap ALL consumers in one step, then run `capydb migrate verify` against the old source")
 		}
 	}
+	// Env shadowing outranks the other warnings: it makes a migration look
+	// finished while half the tooling still writes to the old database.
+	for _, conflict := range report.EnvConflicts {
+		warning := "ENV SHADOWING: " + conflict.Describe() +
+			" - the framework resolves one, path-pinned loaders resolve another. Keep DB credentials in exactly ONE env file"
+		if pins := pinnedLoadersFor(report.Repo.EnvLoaders, conflict); len(pins) > 0 {
+			warning += "; these bypass framework precedence: " + strings.Join(pins, ", ")
+		}
+		scenario.Warnings = append(scenario.Warnings, warning)
+	}
+
 	if len(report.Repo.Lockfiles) == 0 && len(report.Repo.PackageDirs) > 0 {
 		scenario.Warnings = append(scenario.Warnings, "no lockfile found - dependency state is not reproducible; resolve before migrating")
 	}
-	if has(report.Repo.DataLayers, "drizzle") {
+	if has(report.Repo.DataLayers, "drizzle") && !report.Repo.DrizzleSchemaFilter {
 		// drizzle-kit v1 hygiene: push/pull manage every schema by default, and
-		// migration verification moved into the kit.
+		// migration verification moved into the kit. Suppressed once the config
+		// actually sets schemaFilter - a warning that survives its own fix
+		// trains people to ignore the list.
 		scenario.Warnings = append(scenario.Warnings,
 			"drizzle-kit v1 manages ALL schemas by default - set schemaFilter: [\"public\"] in drizzle.config.ts so extension schemas (e.g. cron from pg_cron) are never offered for DROP",
 			"after the move, verify migrations with `drizzle-kit check` (branch-conflict detection) and preview DDL with `drizzle-kit push --explain` before applying",

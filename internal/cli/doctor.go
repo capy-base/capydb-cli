@@ -11,6 +11,7 @@ import (
 
 	"github.com/capy-base/capydb/cli/internal/config"
 	"github.com/capy-base/capydb/cli/internal/exitcode"
+	"github.com/capy-base/capydb/cli/internal/scan"
 )
 
 const (
@@ -117,6 +118,22 @@ func (a *app) runDoctor(cmd *cobra.Command, args []string) error {
 		checks = append(checks, doctorCheck{Name: "psql", Status: doctorFail, Detail: "psql not found in PATH; install the Postgres client tools (e.g. `brew install libpq` or `apt install postgresql-client`)"})
 	} else {
 		checks = append(checks, doctorCheck{Name: "psql", Status: doctorPass, Detail: psqlPath})
+	}
+
+	// 6. Env shadowing: the same key pointing at two databases across env files.
+	// A half-migrated repo is otherwise silent - the app reads one file, tools
+	// that pin a path read another - so this belongs in a health check, not
+	// only in the one-shot migration scan.
+	if conflicts, conflictErr := scan.DetectEnvConflicts(a.cwd); conflictErr != nil {
+		checks = append(checks, doctorCheck{Name: "env_shadowing", Status: doctorSkip, Detail: conflictErr.Error()})
+	} else if len(conflicts) == 0 {
+		checks = append(checks, doctorCheck{Name: "env_shadowing", Status: doctorPass, Detail: "no env key points at more than one database"})
+	} else {
+		details := make([]string, 0, len(conflicts))
+		for _, conflict := range conflicts {
+			details = append(details, conflict.Describe())
+		}
+		checks = append(checks, doctorCheck{Name: "env_shadowing", Status: doctorFail, Detail: strings.Join(details, "; ")})
 	}
 
 	failed := 0
