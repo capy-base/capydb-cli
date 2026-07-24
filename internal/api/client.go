@@ -337,11 +337,20 @@ type ProjectAuditEvent struct {
 // ProjectExtension describes a Postgres extension and whether it is enabled
 // for the project database.
 type ProjectExtension struct {
-	DefaultVersion string `json:"default_version"`
-	Description    string `json:"description"`
-	Enabled        bool   `json:"enabled"`
-	Name           string `json:"name"`
-	Trusted        bool   `json:"trusted"`
+	// AvailableVersion is what the platform now provides; InstalledVersion is
+	// what this database actually has. CREATE EXTENSION pins the version present
+	// at the time, so the two diverge after a platform package upgrade until the
+	// customer applies an update.
+	AvailableVersion string `json:"available_version,omitempty"`
+	DefaultVersion   string `json:"default_version"`
+	Description      string `json:"description"`
+	Enabled          bool   `json:"enabled"`
+	InstalledVersion string `json:"installed_version,omitempty"`
+	Name             string `json:"name"`
+	Trusted          bool   `json:"trusted"`
+	// UpdateAvailable is false for extensions CapyDB manages itself - those are
+	// kept current automatically and are not the customer's to bump.
+	UpdateAvailable bool `json:"update_available,omitempty"`
 }
 
 // ProjectAlert is a triggered resource alert (storage, connections, …) for a
@@ -1164,6 +1173,47 @@ func (c *Client) EnableProjectExtension(ctx context.Context, projectID, name str
 
 // DisableProjectExtension queues dropping a Postgres extension and returns the
 // async job.
+// UpdateProjectExtension bumps an already-enabled extension to the version the
+// platform provides. Customer-initiated by design: an extension's upgrade
+// scripts can change behaviour inside the customer's data. No-op when already
+// current, so retries are safe.
+func (c *Client) UpdateProjectExtension(ctx context.Context, projectID, name string) (Job, error) {
+	var response struct {
+		Job Job `json:"job"`
+	}
+	path := "/v1/projects/" + projectID + "/extensions/" + url.PathEscape(strings.TrimSpace(name)) + "/update"
+	if err := c.do(ctx, http.MethodPost, path, nil, &response); err != nil {
+		return Job{}, err
+	}
+	return response.Job, nil
+}
+
+// UpgradeProjectMinor restarts the project's database onto the PostgreSQL minor
+// already installed on the platform. Minors are binary-compatible, so this is a
+// restart rather than a migration.
+func (c *Client) UpgradeProjectMinor(ctx context.Context, projectID string) (Job, error) {
+	var response struct {
+		Job Job `json:"job"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/upgrade/minor", nil, &response); err != nil {
+		return Job{}, err
+	}
+	return response.Job, nil
+}
+
+// MajorUpgradePreflight enqueues the read-only check of whether the project can
+// move to targetMajor. The verdict lands in the job result.
+func (c *Client) MajorUpgradePreflight(ctx context.Context, projectID string, targetMajor int) (Job, error) {
+	var response struct {
+		Job Job `json:"job"`
+	}
+	path := fmt.Sprintf("/v1/projects/%s/upgrade/major/preflight?target_major=%d", projectID, targetMajor)
+	if err := c.do(ctx, http.MethodPost, path, nil, &response); err != nil {
+		return Job{}, err
+	}
+	return response.Job, nil
+}
+
 func (c *Client) DisableProjectExtension(ctx context.Context, projectID, name string) (Job, error) {
 	var response struct {
 		Job Job `json:"job"`

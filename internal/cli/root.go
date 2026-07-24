@@ -136,6 +136,7 @@ Exit codes:
 	root.AddCommand(application.newAPIKeysCommand())
 	root.AddCommand(application.newAuditCommand())
 	root.AddCommand(application.newExtensionsCommand())
+	root.AddCommand(application.newUpgradeCommand())
 	root.AddCommand(application.newAlertsCommand())
 	root.AddCommand(application.newDoctorCommand())
 	root.AddCommand(application.newConfigCommand())
