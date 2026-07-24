@@ -1173,6 +1173,30 @@ func (c *Client) EnableProjectExtension(ctx context.Context, projectID, name str
 
 // DisableProjectExtension queues dropping a Postgres extension and returns the
 // async job.
+// SQLQueryResult is one statement's result from the project SQL runner.
+type SQLQueryResult struct {
+	Columns    []string         `json:"columns"`
+	DurationMs int64            `json:"duration_ms"`
+	Rows       []map[string]any `json:"rows"`
+	RowCount   int              `json:"row_count"`
+	Truncated  bool             `json:"truncated"`
+}
+
+// RunProjectSQL executes a statement against the project's database through the
+// control plane. Used by `capydb doctor` for checks that can only be answered by
+// the live database - the ones a file-only linter cannot make.
+func (c *Client) RunProjectSQL(ctx context.Context, projectID, query string, maxRows int) (SQLQueryResult, error) {
+	var result SQLQueryResult
+	payload := map[string]any{"query": query}
+	if maxRows > 0 {
+		payload["max_rows"] = maxRows
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/sql", payload, &result); err != nil {
+		return SQLQueryResult{}, err
+	}
+	return result, nil
+}
+
 // UpdateProjectExtension bumps an already-enabled extension to the version the
 // platform provides. Customer-initiated by design: an extension's upgrade
 // scripts can change behaviour inside the customer's data. No-op when already

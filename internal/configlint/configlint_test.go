@@ -206,3 +206,45 @@ func TestCleanProjectHasNoFindings(t *testing.T) {
 		t.Fatalf("a correctly configured project must be silent, got %+v", findings)
 	}
 }
+
+// The investobase failure: a database built with `db:push`, then `db:migrate`
+// replays from migration #1 and dies on `relation "contacts" already exists`.
+func TestDrizzlePushAndMigrateMixed(t *testing.T) {
+	root := writeProject(t, map[string]string{
+		"package.json": `{"scripts":{"db:push":"drizzle-kit push","db:migrate":"drizzle-kit migrate"}}`,
+	})
+	findings, err := Run(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rules(findings)["drizzle_push_and_migrate_mixed"]; !ok {
+		t.Fatalf("expected drizzle_push_and_migrate_mixed: %+v", findings)
+	}
+}
+
+func TestDrizzlePushOnlyIsClean(t *testing.T) {
+	root := writeProject(t, map[string]string{
+		"package.json": `{"scripts":{"db:push":"drizzle-kit push"}}`,
+	})
+	findings, err := Run(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rules(findings)["drizzle_push_and_migrate_mixed"]; ok {
+		t.Fatalf("push alone is a valid workflow; must not be flagged: %+v", findings)
+	}
+}
+
+func TestNonDrizzleScriptsIgnored(t *testing.T) {
+	// "migrate" and "push" in unrelated scripts must not trigger the rule.
+	root := writeProject(t, map[string]string{
+		"package.json": `{"scripts":{"deploy":"git push","data:migrate":"node scripts/migrate.mjs"}}`,
+	})
+	findings, err := Run(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rules(findings)["drizzle_push_and_migrate_mixed"]; ok {
+		t.Fatalf("non-drizzle scripts must not be flagged: %+v", findings)
+	}
+}

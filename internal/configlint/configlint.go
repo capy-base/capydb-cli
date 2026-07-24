@@ -14,6 +14,7 @@
 package configlint
 
 import (
+	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -90,6 +91,8 @@ func Run(root string) ([]Finding, error) {
 		switch {
 		case strings.HasPrefix(name, "drizzle.config."):
 			findings = append(findings, lintDrizzleConfig(path, rel, env)...)
+		case name == "package.json":
+			findings = append(findings, lintPackageScripts(path, rel)...)
 		case name == "schema.prisma":
 			findings = append(findings, lintPrismaSchema(path, rel, env)...)
 		case name == "database.yml":
@@ -222,12 +225,59 @@ func lintDrizzleConfig(path, rel string, env map[string]envURL) []Finding {
 	if !strings.Contains(body, "schemaFilter") {
 		findings = append(findings, Finding{
 			Rule: "missing_schema_filter", Severity: SeverityWarning,
-			File: rel,
+			File:    rel,
 			Message: "no schemaFilter: drizzle-kit v1 manages every schema by default, so push can offer schemas you do not own for DROP",
 			Fix:     `add schemaFilter: ["public"]`,
 		})
 	}
 	return findings
+}
+
+// lintPackageScripts flags the drizzle push/migrate mix.
+//
+// `drizzle-kit push` applies the schema directly and records NOTHING in the
+// migrations table. If the live database was built that way and the repo also
+// carries generated migrations, the first `drizzle-kit migrate` replays from
+// migration #1 against a database that already has those objects and dies on
+// `relation "..." already exists`. The database is fine; the migration history
+// simply never knew about it.
+//
+// The fix is to baseline: mark the existing migrations as already applied
+// (drizzle-kit's --init / a one-off insert into the migrations table) so
+// `migrate` starts from the current state instead of from zero.
+func lintPackageScripts(path, rel string) []Finding {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if json.Unmarshal(data, &pkg) != nil || len(pkg.Scripts) == 0 {
+		return nil
+	}
+	hasPush, hasMigrate := false, false
+	for _, cmd := range pkg.Scripts {
+		lower := strings.ToLower(cmd)
+		if !strings.Contains(lower, "drizzle-kit") {
+			continue
+		}
+		if strings.Contains(lower, "push") {
+			hasPush = true
+		}
+		if strings.Contains(lower, "migrate") {
+			hasMigrate = true
+		}
+	}
+	if !hasPush || !hasMigrate {
+		return nil
+	}
+	return []Finding{{
+		Rule: "drizzle_push_and_migrate_mixed", Severity: SeverityWarning,
+		File:    rel,
+		Message: "this project has both a drizzle-kit push and a drizzle-kit migrate script; push does not record anything in the migrations table, so if the live database was built with push, the first migrate replays from migration #1 and fails with \"already exists\"",
+		Fix:     "pick one per environment, and baseline before the first migrate: mark existing migrations as applied so migrate starts from the current schema instead of from zero",
+	}}
 }
 
 func lintPrismaSchema(path, rel string, env map[string]envURL) []Finding {
@@ -361,7 +411,7 @@ func lintRailsDatabase(path, rel string) []Finding {
 	if !strings.Contains(body, "prepared_statements") && strings.Contains(body, "6432") {
 		findings = append(findings, Finding{
 			Rule: "missing_prepare_false", Severity: SeverityError,
-			File: rel,
+			File:    rel,
 			Message: "Rails against the pooled endpoint without prepared_statements: false",
 			Fix:     "set prepared_statements: false on the pooled configuration; run migrations on the direct URL",
 		})

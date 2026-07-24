@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -174,6 +175,52 @@ func (a *app) runDoctor(cmd *cobra.Command, args []string) error {
 		checks = append(checks, doctorCheck{Name: "db_config", Status: status, Detail: strings.Join(details, "; ")})
 	}
 
+	// 8. Migration history against the LIVE database. This is the one check a
+	// file-only linter cannot make: the repo knows how many migrations exist,
+	// but only the database knows how many were ever applied. A schema applied
+	// with `push` records nothing, so the first `migrate` replays from the first
+	// migration into a populated database and fails on existing objects.
+	// Needs a linked project and working auth; degrades to skip otherwise.
+	local := configlint.DetectLocalMigrations(a.cwd)
+	switch {
+	case local.Tool == "":
+		// no migrations on disk - nothing to compare
+	case strings.TrimSpace(linkConfig.ProjectID) == "" || !authValid:
+		checks = append(checks, doctorCheck{Name: "migration_history", Status: doctorSkip, Detail: "needs a linked project and authentication to inspect the live database"})
+	default:
+		client, clientErr := a.newAPIClient(a.resolveAPIURL(linkConfig.APIURL), authConfig.APIKey)
+		if clientErr != nil {
+			checks = append(checks, doctorCheck{Name: "migration_history", Status: doctorSkip, Detail: clientErr.Error()})
+			break
+		}
+		query := configlint.MigrationStateQuery(local.Tool)
+		result, sqlErr := client.RunProjectSQL(ctx, linkConfig.ProjectID, query, 1)
+		switch {
+		case sqlErr != nil:
+			// A paused cell, a permissions quirk, or a missing migrations table
+			// all land here; none is worth failing the command over.
+			checks = append(checks, doctorCheck{Name: "migration_history", Status: doctorSkip, Detail: "could not read migration state: " + sqlErr.Error()})
+		case len(result.Rows) == 0:
+			checks = append(checks, doctorCheck{Name: "migration_history", Status: doctorSkip, Detail: "live database returned no migration state"})
+		default:
+			applied := intFromRow(result.Rows[0], "applied")
+			tables := intFromRow(result.Rows[0], "user_tables")
+			if finding := configlint.EvaluateMigrationState(local, applied, tables); finding != nil {
+				checks = append(checks, doctorCheck{
+					Name:   "migration_history",
+					Status: doctorFail,
+					Detail: fmt.Sprintf("%s [%s] %s -> %s", finding.File, finding.Rule, finding.Message, finding.Fix),
+				})
+			} else {
+				checks = append(checks, doctorCheck{
+					Name:   "migration_history",
+					Status: doctorPass,
+					Detail: fmt.Sprintf("%s: %d local migrations, %d applied on the live database", local.Tool, local.Count, applied),
+				})
+			}
+		}
+	}
+
 	failed := 0
 	for _, check := range checks {
 		if check.Status == doctorFail {
@@ -205,4 +252,24 @@ func (a *app) runDoctor(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "All checks passed.")
 	}
 	return nil
+}
+
+// intFromRow reads a count column out of a SQL runner row, tolerating the
+// numeric shapes JSON decoding can produce (float64, json.Number, string).
+func intFromRow(row map[string]any, key string) int {
+	switch v := row[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case string:
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return 0
+		}
+		return n
+	}
+	return 0
 }
