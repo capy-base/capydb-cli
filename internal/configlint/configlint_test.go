@@ -1,0 +1,208 @@
+package configlint
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// writeProject materialises a fake repo on disk. Every case shares the same
+// .env so the linter has to resolve env keys -> pooled/direct, which is the
+// part that makes the rules work across stacks.
+func writeProject(t *testing.T, files map[string]string) string {
+	t.Helper()
+	root := t.TempDir()
+	base := map[string]string{
+		".env": "DATABASE_URL=postgres://u:p@db.capydb.dev:6432/app?sslmode=require\n" +
+			"DATABASE_DIRECT_URL=postgres://u:p@db.capydb.dev:5432/app?sslmode=require\n",
+	}
+	for name, body := range files {
+		base[name] = body
+	}
+	for name, body := range base {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+func rules(findings []Finding) map[string]Finding {
+	byRule := map[string]Finding{}
+	for _, f := range findings {
+		byRule[f.Rule] = f
+	}
+	return byRule
+}
+
+func TestDrizzleConfigPooledURLForMigrations(t *testing.T) {
+	root := writeProject(t, map[string]string{
+		"drizzle.config.ts": `import { defineConfig } from 'drizzle-kit'
+export default defineConfig({
+  dialect: 'postgresql',
+  schema: './src/db/schema.ts',
+  schemaFilter: ['public'],
+  dbCredentials: { url: process.env.DATABASE_URL! },
+})`,
+	})
+	findings, err := Run(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := rules(findings)
+	if _, ok := found["pooled_url_for_migrations"]; !ok {
+		t.Fatalf("expected pooled_url_for_migrations, got %+v", findings)
+	}
+	if found["pooled_url_for_migrations"].Severity != SeverityError {
+		t.Fatal("pointing migrations at the pooler is an error, not a warning")
+	}
+	if _, ok := found["missing_schema_filter"]; ok {
+		t.Fatal("schemaFilter was present; should not be flagged")
+	}
+}
+
+func TestDrizzleConfigDirectURLIsClean(t *testing.T) {
+	root := writeProject(t, map[string]string{
+		"drizzle.config.ts": `export default defineConfig({
+  schemaFilter: ['public'],
+  dbCredentials: { url: process.env.DATABASE_DIRECT_URL ?? process.env.DATABASE_URL! },
+})`,
+	})
+	findings, err := Run(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rules(findings)["pooled_url_for_migrations"]; ok {
+		t.Fatalf("direct URL must not be flagged: %+v", findings)
+	}
+}
+
+func TestDrizzleConfigMissingSchemaFilter(t *testing.T) {
+	root := writeProject(t, map[string]string{
+		"drizzle.config.ts": `export default defineConfig({
+  dbCredentials: { url: process.env.DATABASE_DIRECT_URL! },
+})`,
+	})
+	findings, err := Run(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rules(findings)["missing_schema_filter"]; !ok {
+		t.Fatalf("drizzle-kit v1 manages all schemas; expected the warning: %+v", findings)
+	}
+}
+
+func TestPrismaPooledWithoutDirectURL(t *testing.T) {
+	root := writeProject(t, map[string]string{
+		"prisma/schema.prisma": `datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}`,
+	})
+	findings, err := Run(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := rules(findings)
+	if _, ok := found["prisma_missing_direct_url"]; !ok {
+		t.Fatalf("expected prisma_missing_direct_url: %+v", findings)
+	}
+	if _, ok := found["prisma_missing_pgbouncer_flag"]; !ok {
+		t.Fatalf("expected prisma_missing_pgbouncer_flag: %+v", findings)
+	}
+}
+
+func TestPostgresJSMissingPrepareFalseAndOversizedPool(t *testing.T) {
+	root := writeProject(t, map[string]string{
+		"src/db.ts": `import postgres from 'postgres'
+const sql = postgres(process.env.DATABASE_URL!, {
+  max: 50,
+})
+export default sql`,
+	})
+	findings, err := Run(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := rules(findings)
+	if _, ok := found["missing_prepare_false"]; !ok {
+		t.Fatalf("expected missing_prepare_false: %+v", findings)
+	}
+	if _, ok := found["oversized_pool"]; !ok {
+		t.Fatalf("expected oversized_pool: %+v", findings)
+	}
+}
+
+func TestPostgresJSWithPrepareFalseIsClean(t *testing.T) {
+	root := writeProject(t, map[string]string{
+		"src/db.ts": `import postgres from 'postgres'
+const sql = postgres(process.env.DATABASE_URL!, { prepare: false, max: 1 })`,
+	})
+	findings, err := Run(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := rules(findings)
+	if _, ok := found["missing_prepare_false"]; ok {
+		t.Fatalf("prepare: false was set; must not be flagged: %+v", findings)
+	}
+	if _, ok := found["oversized_pool"]; ok {
+		t.Fatalf("max: 1 must not be flagged: %+v", findings)
+	}
+}
+
+// The investobase failure mode: one transaction wrapping a per-row write loop,
+// which the plan's idle_in_transaction_session_timeout cuts partway through.
+func TestUnbatchedBulkTransaction(t *testing.T) {
+	root := writeProject(t, map[string]string{
+		"scripts/backfill.mjs": `const sql = postgres(process.env.DATABASE_DIRECT_URL, { max: 1 })
+await sql.begin(async (tx) => {
+  for (const row of rows) {
+    await tx` + "`INSERT INTO target (id) VALUES (${row.id})`" + `
+  }
+})`,
+	})
+	findings, err := Run(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rules(findings)["unbatched_bulk_transaction"]; !ok {
+		t.Fatalf("expected unbatched_bulk_transaction: %+v", findings)
+	}
+}
+
+func TestSkipsVendoredTrees(t *testing.T) {
+	root := writeProject(t, map[string]string{
+		"node_modules/pkg/drizzle.config.ts": `export default defineConfig({
+  dbCredentials: { url: process.env.DATABASE_URL! },
+})`,
+	})
+	findings, err := Run(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("node_modules must be skipped, got %+v", findings)
+	}
+}
+
+func TestCleanProjectHasNoFindings(t *testing.T) {
+	root := writeProject(t, map[string]string{
+		"drizzle.config.ts": `export default defineConfig({
+  schemaFilter: ['public'],
+  dbCredentials: { url: process.env.DATABASE_DIRECT_URL! },
+})`,
+		"src/db.ts": `const sql = postgres(process.env.DATABASE_URL!, { prepare: false, max: 1 })`,
+	})
+	findings, err := Run(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("a correctly configured project must be silent, got %+v", findings)
+	}
+}

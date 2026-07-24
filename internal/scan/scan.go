@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -442,6 +443,23 @@ func classifyHost(host string) string {
 	default:
 		return "other"
 	}
+}
+
+// IsPooledURL reports whether a postgres connection string points at a
+// transaction pooler rather than the direct port. Exported so the config
+// linter and the scanner agree on one definition of "pooled" - the rules that
+// depend on it (no migrations, no prepared statements, small client pools) are
+// only correct if that classification is shared.
+func IsPooledURL(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return false
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	return isPooledEndpoint(parsed.Hostname(), parsed.Port())
 }
 
 func isPooledEndpoint(host, port string) bool {

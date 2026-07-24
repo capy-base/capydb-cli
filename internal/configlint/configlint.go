@@ -1,0 +1,426 @@
+// Package configlint statically inspects a project's database configuration
+// and reports the CapyDB-specific misconfigurations that otherwise surface as
+// runtime failures hours later.
+//
+// Why a linter and not a runtime wrapper: of the things unique to CapyDB, only
+// cold-start wake latency is a runtime concern. Everything else - which URL you
+// use for migrations, prepared statements through the transaction pooler,
+// client pool sizing - is CONFIGURATION. Configuration can be read from disk,
+// which means one linter covers every stack (Drizzle, Prisma, Rails, Django,
+// SQLAlchemy, raw postgres.js) instead of a per-language wrapper covering one.
+// It also cannot break anyone's runtime, because it never runs their code.
+//
+// The linter is read-only and never dials the network.
+package configlint
+
+import (
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/capy-base/capydb/cli/internal/scan"
+)
+
+// Severity separates "this will bite you" from "this is worth knowing".
+type Severity string
+
+const (
+	SeverityError   Severity = "error"
+	SeverityWarning Severity = "warning"
+)
+
+// Finding is one configuration problem, anchored to the file that causes it.
+type Finding struct {
+	Rule     string   `json:"rule"`
+	Severity Severity `json:"severity"`
+	File     string   `json:"file"`
+	Line     int      `json:"line,omitempty"`
+	Message  string   `json:"message"`
+	Fix      string   `json:"fix,omitempty"`
+}
+
+// skipDirs keeps the walk off vendored trees; mirrors the scanner's exclusions.
+var skipDirs = map[string]bool{
+	"node_modules": true, ".git": true, "dist": true, "build": true, ".next": true,
+	"vendor": true, "__pycache__": true, ".venv": true, "venv": true, "target": true,
+	".turbo": true, "coverage": true, ".svelte-kit": true,
+}
+
+var (
+	envAssignPattern = regexp.MustCompile(`^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["']?([^"'\r\n#]+)`)
+	envRefPattern    = regexp.MustCompile(`(?:process\.env\.([A-Za-z_][A-Za-z0-9_]*)|process\.env\[["']([A-Za-z_][A-Za-z0-9_]*)["']\]|env\(["']([A-Za-z_][A-Za-z0-9_]*)["']\)|os\.environ(?:\.get)?[\[(]["']([A-Za-z_][A-Za-z0-9_]*)["'])`)
+	postgresLiteral  = regexp.MustCompile(`postgres(?:ql)?://[^\s"'` + "`" + `]+`)
+	maxOptionPattern = regexp.MustCompile(`\bmax\s*:\s*(\d+)`)
+	poolSizePattern  = regexp.MustCompile(`\b(?:pool_size|POOL_SIZE|pool)\s*[:=]\s*(\d+)`)
+)
+
+// pooledPoolCeiling is the largest per-client pool that still makes sense
+// against a transaction pooler. The pooled endpoint exists to multiplex many
+// small client pools onto few server connections; a large client-side max just
+// pins pooler slots.
+const pooledPoolCeiling = 10
+
+// Run inspects the project rooted at root and returns findings sorted by file.
+func Run(root string) ([]Finding, error) {
+	env, err := readEnvURLs(root)
+	if err != nil {
+		return nil, err
+	}
+	findings := []Finding{}
+
+	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if skipDirs[entry.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = path
+		}
+		name := entry.Name()
+		switch {
+		case strings.HasPrefix(name, "drizzle.config."):
+			findings = append(findings, lintDrizzleConfig(path, rel, env)...)
+		case name == "schema.prisma":
+			findings = append(findings, lintPrismaSchema(path, rel, env)...)
+		case name == "database.yml":
+			findings = append(findings, lintRailsDatabase(path, rel)...)
+		case isJSLike(name):
+			findings = append(findings, lintJSSource(path, rel, env)...)
+		case strings.HasSuffix(name, ".py"):
+			findings = append(findings, lintPythonSource(path, rel, env)...)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+
+	sort.Slice(findings, func(i, j int) bool {
+		if findings[i].File != findings[j].File {
+			return findings[i].File < findings[j].File
+		}
+		return findings[i].Line < findings[j].Line
+	})
+	return findings, nil
+}
+
+// envURL records whether a given env key resolves to a pooled endpoint, based
+// on the .env* files in the repo. Config files reference keys, not URLs, so the
+// linter has to resolve one to the other before it can judge anything.
+type envURL struct {
+	pooled bool
+	known  bool
+}
+
+func readEnvURLs(root string) (map[string]envURL, error) {
+	result := map[string]envURL{}
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if skipDirs[entry.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := entry.Name()
+		if name != ".env" && !strings.HasPrefix(name, ".env.") {
+			return nil
+		}
+		// Example files carry placeholder hosts, not real definitions.
+		if strings.Contains(name, "example") || strings.Contains(name, "sample") {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			match := envAssignPattern.FindStringSubmatch(line)
+			if match == nil {
+				continue
+			}
+			value := strings.TrimSpace(match[2])
+			if !strings.HasPrefix(value, "postgres") {
+				continue
+			}
+			// Last definition wins is not knowable statically; treat a key as
+			// pooled if ANY env file points it at a pooler, since that is the
+			// configuration that can bite.
+			existing := result[match[1]]
+			result[match[1]] = envURL{pooled: existing.pooled || scan.IsPooledURL(value), known: true}
+		}
+		return nil
+	})
+	return result, err
+}
+
+// urlIsPooled decides whether a config value - an env reference or a literal
+// URL - points at the pooled endpoint. ok is false when it cannot be resolved.
+func urlIsPooled(value string, env map[string]envURL) (pooled bool, ok bool) {
+	if literal := postgresLiteral.FindString(value); literal != "" {
+		return scan.IsPooledURL(literal), true
+	}
+	for _, match := range envRefPattern.FindAllStringSubmatch(value, -1) {
+		for _, key := range match[1:] {
+			if key == "" {
+				continue
+			}
+			if resolved, found := env[key]; found && resolved.known {
+				return resolved.pooled, true
+			}
+			// A DIRECT-shaped name is a strong signal even without a .env file.
+			if strings.Contains(strings.ToUpper(key), "DIRECT") {
+				return false, true
+			}
+		}
+	}
+	return false, false
+}
+
+func lintDrizzleConfig(path, rel string, env map[string]envURL) []Finding {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	body := string(data)
+	findings := []Finding{}
+
+	for i, line := range strings.Split(body, "\n") {
+		if !strings.Contains(line, "url") {
+			continue
+		}
+		pooled, ok := urlIsPooled(line, env)
+		if ok && pooled {
+			findings = append(findings, Finding{
+				Rule: "pooled_url_for_migrations", Severity: SeverityError,
+				File: rel, Line: i + 1,
+				Message: "drizzle-kit is pointed at the pooled endpoint; migrations need session state and advisory locks that transaction pooling cannot provide",
+				Fix:     "use the direct URL: url: process.env.DATABASE_DIRECT_URL ?? process.env.DATABASE_URL!",
+			})
+		}
+	}
+
+	// drizzle-kit v1 manages ALL schemas by default, so without a filter it
+	// will offer extension-owned schemas (and anything else it did not create)
+	// for DROP on the next push.
+	if !strings.Contains(body, "schemaFilter") {
+		findings = append(findings, Finding{
+			Rule: "missing_schema_filter", Severity: SeverityWarning,
+			File: rel,
+			Message: "no schemaFilter: drizzle-kit v1 manages every schema by default, so push can offer schemas you do not own for DROP",
+			Fix:     `add schemaFilter: ["public"]`,
+		})
+	}
+	return findings
+}
+
+func lintPrismaSchema(path, rel string, env map[string]envURL) []Finding {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	body := string(data)
+	findings := []Finding{}
+
+	urlPooled := false
+	urlLine := 0
+	for i, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "url") {
+			continue
+		}
+		if pooled, ok := urlIsPooled(line, env); ok && pooled {
+			urlPooled = true
+			urlLine = i + 1
+		}
+	}
+	if !urlPooled {
+		return findings
+	}
+
+	// Prisma runs migrations over directUrl; without it, `prisma migrate` goes
+	// through the pooler and can hang or fail on advisory locks.
+	if !strings.Contains(body, "directUrl") {
+		findings = append(findings, Finding{
+			Rule: "prisma_missing_direct_url", Severity: SeverityError,
+			File: rel, Line: urlLine,
+			Message: "datasource uses the pooled URL with no directUrl, so prisma migrate runs through the transaction pooler",
+			Fix:     `add directUrl = env("DATABASE_DIRECT_URL") to the datasource block`,
+		})
+	}
+	// Prisma uses named prepared statements, which transaction pooling does not
+	// support; the flag makes Prisma skip them and its DEALLOCATE ALL assumption.
+	if !strings.Contains(body, "pgbouncer=true") {
+		findings = append(findings, Finding{
+			Rule: "prisma_missing_pgbouncer_flag", Severity: SeverityWarning,
+			File: rel, Line: urlLine,
+			Message: "pooled URL without ?pgbouncer=true; Prisma's prepared-statement cache is not compatible with transaction pooling",
+			Fix:     "append ?pgbouncer=true to the pooled connection string",
+		})
+	}
+	return findings
+}
+
+func lintJSSource(path, rel string, env map[string]envURL) []Finding {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	body := string(data)
+	if !strings.Contains(body, "postgres(") && !strings.Contains(body, "new Pool(") {
+		return checkBulkTransaction(body, rel)
+	}
+	findings := []Finding{}
+	lines := strings.Split(body, "\n")
+
+	for i, line := range lines {
+		if !strings.Contains(line, "postgres(") {
+			continue
+		}
+		pooled, ok := urlIsPooled(line, env)
+		if !ok || !pooled {
+			continue
+		}
+		// postgres.js caches named prepared statements by default, which the
+		// transaction pooler cannot route. Look at a small window because the
+		// options object is usually on following lines.
+		window := strings.Join(lines[i:min(i+6, len(lines))], "\n")
+		if !strings.Contains(window, "prepare") {
+			findings = append(findings, Finding{
+				Rule: "missing_prepare_false", Severity: SeverityError,
+				File: rel, Line: i + 1,
+				Message: "postgres.js on the pooled endpoint without prepare: false; every query will eventually fail with 'prepared statement already exists'",
+				Fix:     "postgres(url, { prepare: false, max: 1 }) - or use createDb() from @capydb/drizzle, which applies this for you",
+			})
+		}
+		if match := maxOptionPattern.FindStringSubmatch(window); match != nil {
+			if size, convErr := strconv.Atoi(match[1]); convErr == nil && size > pooledPoolCeiling {
+				findings = append(findings, Finding{
+					Rule: "oversized_pool", Severity: SeverityWarning,
+					File: rel, Line: i + 1,
+					Message: "client pool of " + match[1] + " against the pooled endpoint; the pooler exists to multiplex small client pools, and a large max just pins its slots",
+					Fix:     "max: 1 in serverless, a small number in a long-lived server",
+				})
+			}
+		}
+	}
+	return append(findings, checkBulkTransaction(body, rel)...)
+}
+
+func lintPythonSource(path, rel string, env map[string]envURL) []Finding {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	body := string(data)
+	findings := []Finding{}
+	for i, line := range strings.Split(body, "\n") {
+		match := poolSizePattern.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		pooled, ok := urlIsPooled(body, env)
+		if !ok || !pooled {
+			continue
+		}
+		if size, convErr := strconv.Atoi(match[1]); convErr == nil && size > pooledPoolCeiling {
+			findings = append(findings, Finding{
+				Rule: "oversized_pool", Severity: SeverityWarning,
+				File: rel, Line: i + 1,
+				Message: "pool_size of " + match[1] + " against the pooled endpoint",
+				Fix:     "use a small pool, or poolclass=NullPool in serverless so the server-side pooler does the pooling",
+			})
+		}
+	}
+	return append(findings, checkBulkTransaction(body, rel)...)
+}
+
+func lintRailsDatabase(path, rel string) []Finding {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	findings := []Finding{}
+	body := string(data)
+	if !strings.Contains(body, "prepared_statements") && strings.Contains(body, "6432") {
+		findings = append(findings, Finding{
+			Rule: "missing_prepare_false", Severity: SeverityError,
+			File: rel,
+			Message: "Rails against the pooled endpoint without prepared_statements: false",
+			Fix:     "set prepared_statements: false on the pooled configuration; run migrations on the direct URL",
+		})
+	}
+	for i, line := range strings.Split(body, "\n") {
+		match := poolSizePattern.FindStringSubmatch(line)
+		if match == nil || !strings.Contains(body, "6432") {
+			continue
+		}
+		if size, convErr := strconv.Atoi(match[1]); convErr == nil && size > pooledPoolCeiling {
+			findings = append(findings, Finding{
+				Rule: "oversized_pool", Severity: SeverityWarning,
+				File: rel, Line: i + 1,
+				Message: "Rails pool of " + match[1] + " against the pooled endpoint",
+				Fix:     "keep the client pool small; the pooled endpoint is already doing the multiplexing",
+			})
+		}
+	}
+	return findings
+}
+
+// checkBulkTransaction flags a long-running write loop wrapped in a single
+// transaction. Plans cap idle_in_transaction_session_timeout (60-120s), so a
+// script that opens one transaction and then does per-row client work gets its
+// session cut partway through - the failure mode is a half-finished migration.
+func checkBulkTransaction(body, rel string) []Finding {
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		lower := strings.ToLower(line)
+		opensTx := strings.Contains(lower, ".begin(") ||
+			strings.Contains(lower, "begin transaction") ||
+			strings.Contains(lower, "begin;")
+		if !opensTx {
+			continue
+		}
+		// A loop containing a write, inside the transaction body.
+		window := strings.Join(lines[i:min(i+40, len(lines))], "\n")
+		hasLoop := strings.Contains(window, "for ") || strings.Contains(window, "while ") ||
+			strings.Contains(window, ".map(") || strings.Contains(window, "forEach")
+		hasWrite := strings.Contains(strings.ToUpper(window), "INSERT ") ||
+			strings.Contains(strings.ToUpper(window), "UPDATE ") ||
+			strings.Contains(strings.ToUpper(window), "COPY ")
+		if hasLoop && hasWrite {
+			return []Finding{{
+				Rule: "unbatched_bulk_transaction", Severity: SeverityWarning,
+				File: rel, Line: i + 1,
+				Message: "a write loop inside a single transaction; plans cap idle_in_transaction_session_timeout at 60-120s, so a large run can be cut partway through",
+				Fix:     "commit in batches (one transaction per batch) with keyset pagination so the script is restartable",
+			}}
+		}
+	}
+	return nil
+}
+
+func isJSLike(name string) bool {
+	for _, suffix := range []string{".ts", ".mts", ".cts", ".js", ".mjs", ".cjs", ".tsx"} {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
+}

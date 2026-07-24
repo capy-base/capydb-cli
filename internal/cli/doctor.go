@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/capy-base/capydb/cli/internal/config"
+	"github.com/capy-base/capydb/cli/internal/configlint"
 	"github.com/capy-base/capydb/cli/internal/exitcode"
 	"github.com/capy-base/capydb/cli/internal/scan"
 )
@@ -134,6 +135,43 @@ func (a *app) runDoctor(cmd *cobra.Command, args []string) error {
 			details = append(details, conflict.Describe())
 		}
 		checks = append(checks, doctorCheck{Name: "env_shadowing", Status: doctorFail, Detail: strings.Join(details, "; ")})
+	}
+
+	// 7. Database configuration across every stack in the repo. Of the things
+	// unique to CapyDB, only cold-start wake latency is a runtime concern -
+	// which URL migrations use, prepared statements through the pooler, and
+	// client pool sizing are all CONFIGURATION, readable from disk. That makes
+	// one linter cover Drizzle, Prisma, Rails, Django and raw postgres.js
+	// instead of a per-language wrapper covering one, and it cannot break
+	// anyone's runtime because it never executes their code.
+	if findings, lintErr := configlint.Run(a.cwd); lintErr != nil {
+		checks = append(checks, doctorCheck{Name: "db_config", Status: doctorSkip, Detail: lintErr.Error()})
+	} else if len(findings) == 0 {
+		checks = append(checks, doctorCheck{Name: "db_config", Status: doctorPass, Detail: "no connection or migration misconfiguration found"})
+	} else {
+		errorCount := 0
+		details := make([]string, 0, len(findings))
+		for _, finding := range findings {
+			if finding.Severity == configlint.SeverityError {
+				errorCount++
+			}
+			location := finding.File
+			if finding.Line > 0 {
+				location = fmt.Sprintf("%s:%d", finding.File, finding.Line)
+			}
+			detail := fmt.Sprintf("%s [%s] %s", location, finding.Rule, finding.Message)
+			if finding.Fix != "" {
+				detail += " -> " + finding.Fix
+			}
+			details = append(details, detail)
+		}
+		// Warnings alone must not fail the command: `doctor` is run in CI by
+		// people who cannot act on every advisory finding immediately.
+		status := doctorPass
+		if errorCount > 0 {
+			status = doctorFail
+		}
+		checks = append(checks, doctorCheck{Name: "db_config", Status: status, Detail: strings.Join(details, "; ")})
 	}
 
 	failed := 0
