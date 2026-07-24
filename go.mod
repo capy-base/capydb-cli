@@ -3,7 +3,7 @@ module github.com/capy-base/capydb/cli
 go 1.26.5
 
 require (
-	github.com/capy-base/capydbclient v1.3.2
+	github.com/capy-base/capydbclient v1.3.5
 	github.com/spf13/cobra v1.10.2
 )
 
