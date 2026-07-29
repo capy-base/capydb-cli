@@ -714,3 +714,323 @@ func TestCompletionCommandIsAvailable(t *testing.T) {
 		t.Fatalf("expected a zsh completion script:\n%s", output)
 	}
 }
+
+func TestUpgradeMajorQueuesJob(t *testing.T) {
+	t.Setenv("CI", "true")
+	isolateUserConfig(t)
+
+	upgradeCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
+			writeJSON(t, w, map[string]any{
+				"projects": []map[string]any{{
+					"id":    "project_up",
+					"name":  "up-app",
+					"slug":  "up-app",
+					"state": "ready",
+				}},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/project_up/upgrade/major":
+			if got := r.URL.Query().Get("target_major"); got != "18" {
+				t.Fatalf("unexpected target_major: %q", got)
+			}
+			upgradeCalled = true
+			w.WriteHeader(http.StatusAccepted)
+			writeJSON(t, w, map[string]any{
+				"job": map[string]any{
+					"id":         "job_major",
+					"state":      "pending",
+					"type":       "project.upgrade_major",
+					"project_id": "project_up",
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_major":
+			writeJSON(t, w, map[string]any{
+				"job": map[string]any{
+					"id":    "job_major",
+					"state": "completed",
+					"type":  "project.upgrade_major",
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	output, err := runCommand(t, t.TempDir(),
+		"upgrade", "major",
+		"--api-url", server.URL,
+		"--api-key", "capy_test_key",
+		"--project", "up-app",
+		"--target-major", "18",
+		"--confirm",
+		"--wait",
+	)
+	if err != nil {
+		t.Fatalf("execute upgrade major: %v", err)
+	}
+	if !upgradeCalled {
+		t.Fatalf("expected the upgrade endpoint to be called")
+	}
+	if !strings.Contains(output, "Queued major upgrade to PostgreSQL 18 for project up-app") {
+		t.Fatalf("unexpected output:\n%s", output)
+	}
+	if !strings.Contains(output, "state: completed") {
+		t.Fatalf("expected completed job state in output:\n%s", output)
+	}
+}
+
+func TestUpgradeMajorRequiresTargetMajor(t *testing.T) {
+	t.Setenv("CI", "true")
+	isolateUserConfig(t)
+
+	_, err := runCommand(t, t.TempDir(),
+		"upgrade", "major",
+		"--api-url", "http://127.0.0.1:0",
+		"--api-key", "capy_test_key",
+	)
+	if err == nil {
+		t.Fatalf("expected an error without --target-major")
+	}
+	var coded *exitcode.Error
+	if !errors.As(err, &coded) || coded.Code != exitcode.UsageError {
+		t.Fatalf("expected usage exit code, got %v", err)
+	}
+}
+
+func TestUpgradeMajorRefusesWithoutConfirm(t *testing.T) {
+	t.Setenv("CI", "true")
+	isolateUserConfig(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
+			writeJSON(t, w, map[string]any{
+				"projects": []map[string]any{{
+					"id":    "project_up",
+					"name":  "up-app",
+					"slug":  "up-app",
+					"state": "ready",
+				}},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	_, err := runCommand(t, t.TempDir(),
+		"upgrade", "major",
+		"--api-url", server.URL,
+		"--api-key", "capy_test_key",
+		"--project", "up-app",
+		"--target-major", "18",
+	)
+	if err == nil || !strings.Contains(err.Error(), "not confirmed") {
+		t.Fatalf("expected a not-confirmed error, got %v", err)
+	}
+}
+
+func TestUpgradeConfirmQueuesJob(t *testing.T) {
+	t.Setenv("CI", "true")
+	isolateUserConfig(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
+			writeJSON(t, w, map[string]any{
+				"projects": []map[string]any{{
+					"id":    "project_up",
+					"name":  "up-app",
+					"slug":  "up-app",
+					"state": "ready",
+				}},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/project_up/upgrade/major/confirm":
+			w.WriteHeader(http.StatusAccepted)
+			writeJSON(t, w, map[string]any{
+				"job": map[string]any{
+					"id":         "job_confirm",
+					"state":      "pending",
+					"type":       "project.upgrade_major_confirm",
+					"project_id": "project_up",
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	output, err := runCommand(t, t.TempDir(),
+		"upgrade", "confirm",
+		"--api-url", server.URL,
+		"--api-key", "capy_test_key",
+		"--project", "up-app",
+		"--confirm",
+	)
+	if err != nil {
+		t.Fatalf("execute upgrade confirm: %v", err)
+	}
+	if !strings.Contains(output, "Queued major-upgrade confirmation for project up-app") {
+		t.Fatalf("unexpected output:\n%s", output)
+	}
+	if !strings.Contains(output, "job_id: job_confirm") {
+		t.Fatalf("expected the job id in output:\n%s", output)
+	}
+}
+
+func TestUpgradeRollbackQueuesJob(t *testing.T) {
+	t.Setenv("CI", "true")
+	isolateUserConfig(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
+			writeJSON(t, w, map[string]any{
+				"projects": []map[string]any{{
+					"id":    "project_up",
+					"name":  "up-app",
+					"slug":  "up-app",
+					"state": "ready",
+				}},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/project_up/upgrade/major/rollback":
+			w.WriteHeader(http.StatusAccepted)
+			writeJSON(t, w, map[string]any{
+				"job": map[string]any{
+					"id":         "job_rollback",
+					"state":      "pending",
+					"type":       "project.upgrade_major_rollback",
+					"project_id": "project_up",
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	output, err := runCommand(t, t.TempDir(),
+		"upgrade", "rollback",
+		"--api-url", server.URL,
+		"--api-key", "capy_test_key",
+		"--project", "up-app",
+		"--confirm",
+	)
+	if err != nil {
+		t.Fatalf("execute upgrade rollback: %v", err)
+	}
+	if !strings.Contains(output, "Queued major-upgrade rollback for project up-app") {
+		t.Fatalf("unexpected output:\n%s", output)
+	}
+	if !strings.Contains(output, "job_id: job_rollback") {
+		t.Fatalf("expected the job id in output:\n%s", output)
+	}
+}
+
+func TestWebhooksTestQueuesDelivery(t *testing.T) {
+	t.Setenv("CI", "true")
+	isolateUserConfig(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/me":
+			writeViewer(t, w, "org_hook")
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/organizations/org_hook/webhook-endpoints/whe_1/test":
+			w.WriteHeader(http.StatusAccepted)
+			writeJSON(t, w, map[string]any{
+				"delivery": map[string]any{
+					"id":              "whd_test",
+					"endpoint_id":     "whe_1",
+					"organization_id": "org_hook",
+					"event_type":      "webhook.test",
+					"state":           "pending",
+					"attempts":        0,
+					"max_attempts":    1,
+					"created_at":      "2026-07-28T10:00:00Z",
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	output, err := runCommand(t, t.TempDir(),
+		"webhooks", "test", "whe_1",
+		"--api-url", server.URL,
+		"--api-key", "capy_test_key",
+	)
+	if err != nil {
+		t.Fatalf("execute webhooks test: %v", err)
+	}
+	if !strings.Contains(output, "Queued test event delivery whd_test for webhook endpoint whe_1") {
+		t.Fatalf("unexpected output:\n%s", output)
+	}
+	if !strings.Contains(output, "capydb webhooks deliveries whe_1") {
+		t.Fatalf("expected the deliveries follow-up hint in output:\n%s", output)
+	}
+}
+
+func TestWebhooksRedeliverQueuesDelivery(t *testing.T) {
+	t.Setenv("CI", "true")
+	isolateUserConfig(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/me":
+			writeViewer(t, w, "org_hook")
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/organizations/org_hook/webhook-endpoints/whe_1/deliveries/whd_1/redeliver":
+			w.WriteHeader(http.StatusAccepted)
+			writeJSON(t, w, map[string]any{
+				"delivery": map[string]any{
+					"id":              "whd_2",
+					"endpoint_id":     "whe_1",
+					"organization_id": "org_hook",
+					"event_type":      "backup.completed",
+					"state":           "pending",
+					"attempts":        0,
+					"max_attempts":    5,
+					"created_at":      "2026-07-28T10:00:00Z",
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	output, err := runCommand(t, t.TempDir(),
+		"webhooks", "redeliver", "whd_1",
+		"--endpoint", "whe_1",
+		"--api-url", server.URL,
+		"--api-key", "capy_test_key",
+	)
+	if err != nil {
+		t.Fatalf("execute webhooks redeliver: %v", err)
+	}
+	if !strings.Contains(output, "Queued redelivery whd_2 of delivery whd_1 for webhook endpoint whe_1") {
+		t.Fatalf("unexpected output:\n%s", output)
+	}
+}
+
+func TestWebhooksRedeliverRequiresEndpoint(t *testing.T) {
+	t.Setenv("CI", "true")
+	isolateUserConfig(t)
+
+	_, err := runCommand(t, t.TempDir(),
+		"webhooks", "redeliver", "whd_1",
+		"--api-url", "http://127.0.0.1:0",
+		"--api-key", "capy_test_key",
+	)
+	if err == nil {
+		t.Fatalf("expected an error without --endpoint")
+	}
+	var coded *exitcode.Error
+	if !errors.As(err, &coded) || coded.Code != exitcode.UsageError {
+		t.Fatalf("expected usage exit code, got %v", err)
+	}
+}

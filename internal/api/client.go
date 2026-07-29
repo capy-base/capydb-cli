@@ -306,22 +306,7 @@ type WebhookEndpoint = capydbclient.WebhookEndpoint
 
 type CreateWebhookEndpointRequest = capydbclient.CreateWebhookEndpointRequest
 
-type WebhookDelivery struct {
-	Attempts       int        `json:"attempts"`
-	CreatedAt      time.Time  `json:"created_at"`
-	DeliveredAt    *time.Time `json:"delivered_at,omitempty"`
-	EndpointID     string     `json:"endpoint_id"`
-	EventType      string     `json:"event_type"`
-	ID             string     `json:"id"`
-	LastError      string     `json:"last_error,omitempty"`
-	MaxAttempts    int        `json:"max_attempts"`
-	NextAttemptAt  time.Time  `json:"next_attempt_at"`
-	OrganizationID string     `json:"organization_id"`
-	Payload        any        `json:"payload"`
-	ResponseStatus int        `json:"response_status,omitempty"`
-	State          string     `json:"state"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-}
+type WebhookDelivery = capydbclient.WebhookDelivery
 
 type ProjectAuditEvent struct {
 	Action         string    `json:"action"`
@@ -1131,6 +1116,36 @@ func (c *Client) ListWebhookDeliveries(ctx context.Context, orgID, endpointID st
 	return response.Deliveries, nil
 }
 
+// SendTestWebhookEvent enqueues one synthetic webhook.test event to the
+// endpoint so the receiver and its signature verification can be exercised
+// end-to-end. The test event is delivered with a single attempt (no retries);
+// the outcome shows up in the delivery listing.
+func (c *Client) SendTestWebhookEvent(ctx context.Context, orgID, endpointID string) (WebhookDelivery, error) {
+	var response struct {
+		Delivery WebhookDelivery `json:"delivery"`
+	}
+	path := "/v1/organizations/" + orgID + "/webhook-endpoints/" + endpointID + "/test"
+	if err := c.do(ctx, http.MethodPost, path, nil, &response); err != nil {
+		return WebhookDelivery{}, err
+	}
+	return response.Delivery, nil
+}
+
+// RedeliverWebhookDelivery re-enqueues an existing delivery's payload as a
+// fresh pending delivery to the same endpoint (same event envelope, new
+// delivery id, attempts reset). The original delivery is kept as the
+// historical record.
+func (c *Client) RedeliverWebhookDelivery(ctx context.Context, orgID, endpointID, deliveryID string) (WebhookDelivery, error) {
+	var response struct {
+		Delivery WebhookDelivery `json:"delivery"`
+	}
+	path := "/v1/organizations/" + orgID + "/webhook-endpoints/" + endpointID + "/deliveries/" + deliveryID + "/redeliver"
+	if err := c.do(ctx, http.MethodPost, path, nil, &response); err != nil {
+		return WebhookDelivery{}, err
+	}
+	return response.Delivery, nil
+}
+
 func (c *Client) ListProjectAuditEvents(ctx context.Context, projectID string, limit int) ([]ProjectAuditEvent, error) {
 	path := "/v1/projects/" + projectID + "/audit-events"
 	if limit > 0 {
@@ -1233,6 +1248,47 @@ func (c *Client) MajorUpgradePreflight(ctx context.Context, projectID string, ta
 	}
 	path := fmt.Sprintf("/v1/projects/%s/upgrade/major/preflight?target_major=%d", projectID, targetMajor)
 	if err := c.do(ctx, http.MethodPost, path, nil, &response); err != nil {
+		return Job{}, err
+	}
+	return response.Job, nil
+}
+
+// UpgradeProjectMajor starts a major-version upgrade: a new database is staged
+// on targetMajor, the data is copied across and verified, and the project is
+// swapped onto it. The previous version stays available for rollback until the
+// upgrade is confirmed. Run the preflight first.
+func (c *Client) UpgradeProjectMajor(ctx context.Context, projectID string, targetMajor int) (Job, error) {
+	var response struct {
+		Job Job `json:"job"`
+	}
+	path := fmt.Sprintf("/v1/projects/%s/upgrade/major?target_major=%d", projectID, targetMajor)
+	if err := c.do(ctx, http.MethodPost, path, nil, &response); err != nil {
+		return Job{}, err
+	}
+	return response.Job, nil
+}
+
+// ConfirmProjectMajorUpgrade finalizes a major upgrade by discarding the
+// previous version retained for rollback. After this the upgrade can no longer
+// be rolled back.
+func (c *Client) ConfirmProjectMajorUpgrade(ctx context.Context, projectID string) (Job, error) {
+	var response struct {
+		Job Job `json:"job"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/upgrade/major/confirm", nil, &response); err != nil {
+		return Job{}, err
+	}
+	return response.Job, nil
+}
+
+// RollbackProjectMajorUpgrade reverts a major upgrade, pointing the project
+// back at the previous version and discarding the upgraded database. Lossless
+// while the upgrade has not been confirmed.
+func (c *Client) RollbackProjectMajorUpgrade(ctx context.Context, projectID string) (Job, error) {
+	var response struct {
+		Job Job `json:"job"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/upgrade/major/rollback", nil, &response); err != nil {
 		return Job{}, err
 	}
 	return response.Job, nil

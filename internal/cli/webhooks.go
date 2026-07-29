@@ -207,11 +207,91 @@ func (a *app) newWebhooksCommand() *cobra.Command {
 	}
 	deliveriesCommand.Flags().IntVar(&deliveriesLimit, "limit", 0, "Maximum number of deliveries to return (server default when omitted)")
 
+	testCommand := &cobra.Command{
+		Use:   "test <endpoint-id>",
+		Short: "Send a synthetic test event to a webhook endpoint",
+		Long: "Enqueues one synthetic webhook.test event so the receiver and its signature " +
+			"verification can be exercised end-to-end. The test event is delivered with a " +
+			"single attempt (no retries); check the outcome with `capydb webhooks deliveries`.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			endpointID := strings.TrimSpace(args[0])
+			if endpointID == "" {
+				return usageErrorf("endpoint id is required")
+			}
+
+			client, authConfig, err := a.resolveClient(true)
+			if err != nil {
+				return err
+			}
+			orgID, err := a.resolveOrgID(ctx, client, authConfig)
+			if err != nil {
+				return err
+			}
+
+			delivery, err := client.SendTestWebhookEvent(ctx, orgID, endpointID)
+			if err != nil {
+				return fmt.Errorf("send test webhook event: %w", err)
+			}
+			if a.jsonOutput() {
+				return printJSON(cmd.OutOrStdout(), map[string]any{"delivery": delivery})
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued test event delivery %s for webhook endpoint %s\n", delivery.ID, endpointID)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "The test event gets a single attempt; check the outcome with `capydb webhooks deliveries %s`.\n", endpointID)
+			return nil
+		},
+	}
+
+	var redeliverEndpointID string
+	redeliverCommand := &cobra.Command{
+		Use:   "redeliver <delivery-id>",
+		Short: "Redeliver a webhook delivery as a fresh attempt",
+		Long: "Re-enqueues an existing delivery's payload as a fresh pending delivery to the " +
+			"same endpoint - same event envelope, new delivery id, attempts reset. The original " +
+			"delivery is kept as the historical record, and the endpoint's event filter is not " +
+			"consulted: redelivery is an explicit operator action.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			deliveryID := strings.TrimSpace(args[0])
+			if deliveryID == "" {
+				return usageErrorf("delivery id is required")
+			}
+			endpointID := strings.TrimSpace(redeliverEndpointID)
+			if endpointID == "" {
+				return usageErrorf("--endpoint is required (find it with `capydb webhooks list`)")
+			}
+
+			client, authConfig, err := a.resolveClient(true)
+			if err != nil {
+				return err
+			}
+			orgID, err := a.resolveOrgID(ctx, client, authConfig)
+			if err != nil {
+				return err
+			}
+
+			delivery, err := client.RedeliverWebhookDelivery(ctx, orgID, endpointID, deliveryID)
+			if err != nil {
+				return fmt.Errorf("redeliver webhook delivery: %w", err)
+			}
+			if a.jsonOutput() {
+				return printJSON(cmd.OutOrStdout(), map[string]any{"delivery": delivery})
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued redelivery %s of delivery %s for webhook endpoint %s\n", delivery.ID, deliveryID, endpointID)
+			return nil
+		},
+	}
+	redeliverCommand.Flags().StringVar(&redeliverEndpointID, "endpoint", "", "Webhook endpoint id the delivery belongs to (required)")
+
 	command.AddCommand(listCommand)
 	command.AddCommand(createCommand)
 	command.AddCommand(deleteCommand)
 	command.AddCommand(rotateCommand)
 	command.AddCommand(deliveriesCommand)
+	command.AddCommand(testCommand)
+	command.AddCommand(redeliverCommand)
 	return command
 }
 

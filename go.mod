@@ -11,3 +11,6 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 )
+
+// TODO: drop after capydbclient v1.4.0 is tagged; bump require to v1.4.0
+replace github.com/capy-base/capydbclient => ../capydbclient
