@@ -27,6 +27,7 @@ func (a *app) newMigrateCommand() *cobra.Command {
 	command.AddCommand(a.newMigrateVerifyCommand())
 	command.AddCommand(a.newMigrateDepsCommand())
 	command.AddCommand(a.newMigrateCodemodCommand())
+	command.AddCommand(a.newMigrateRLSCommand())
 	return command
 }
 

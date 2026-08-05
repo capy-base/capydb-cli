@@ -176,7 +176,7 @@ func (a *app) newExtensionsCommand() *cobra.Command {
 
 func writeExtensionTable(out io.Writer, extensions []api.ProjectExtension) {
 	writer := tabwriter.NewWriter(out, 0, 8, 2, ' ', 0)
-	_, _ = fmt.Fprintln(writer, "NAME\tENABLED\tTRUSTED\tVERSION\tUPDATE\tDESCRIPTION")
+	_, _ = fmt.Fprintln(writer, "NAME\tCATEGORY\tENABLED\tTRUSTED\tRESTART\tVERSION\tUPDATE\tDESCRIPTION")
 	for _, extension := range extensions {
 		enabled := "no"
 		if extension.Enabled {
@@ -193,12 +193,20 @@ func writeExtensionTable(out io.Writer, extensions []api.ProjectExtension) {
 		if extension.UpdateAvailable {
 			update = firstNonEmpty(extension.AvailableVersion, "available")
 		}
+		// Enabling/disabling a preload extension restarts the database, so the
+		// table has to say so before someone scripts it in CI.
+		restart := "no"
+		if extension.RequiresRestart {
+			restart = "yes"
+		}
 		_, _ = fmt.Fprintf(
 			writer,
-			"%s\t%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			extension.Name,
+			firstNonEmpty(extension.Category, "-"),
 			enabled,
 			trusted,
+			restart,
 			version,
 			update,
 			firstNonEmpty(extension.Description, "-"),

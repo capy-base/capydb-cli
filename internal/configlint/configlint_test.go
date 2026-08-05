@@ -3,6 +3,7 @@ package configlint
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -246,5 +247,32 @@ func TestNonDrizzleScriptsIgnored(t *testing.T) {
 	}
 	if _, ok := rules(findings)["drizzle_push_and_migrate_mixed"]; ok {
 		t.Fatalf("non-drizzle scripts must not be flagged: %+v", findings)
+	}
+}
+
+func TestSupabaseRLSUnconverted(t *testing.T) {
+	root := writeProject(t, map[string]string{
+		"supabase/migrations/0001_init.sql": "create policy p on t using (auth.uid() = owner_id);\n",
+		"db/plain.sql":                      "create table t (id int);\n",
+	})
+	findings, err := Run(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byRule := rules(findings)
+	finding, ok := byRule["supabase_rls_unconverted"]
+	if !ok {
+		t.Fatal("SQL calling auth.uid() must be flagged; those policies cannot work outside Supabase")
+	}
+	if finding.Severity != SeverityWarning {
+		t.Fatalf("unconverted RLS is a warning (the import drops it loudly), got %s", finding.Severity)
+	}
+	if finding.Line != 1 {
+		t.Fatalf("finding should anchor to the first auth.* line, got %d", finding.Line)
+	}
+	for _, f := range findings {
+		if f.Rule == "supabase_rls_unconverted" && strings.Contains(f.File, "plain.sql") {
+			t.Fatal("plain SQL without auth helpers must not be flagged")
+		}
 	}
 }

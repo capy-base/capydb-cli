@@ -327,12 +327,18 @@ type ProjectExtension struct {
 	// at the time, so the two diverge after a platform package upgrade until the
 	// customer applies an update.
 	AvailableVersion string `json:"available_version,omitempty"`
+	// Category groups the extension in listings (core, ai, search, ...).
+	Category         string `json:"category,omitempty"`
 	DefaultVersion   string `json:"default_version"`
 	Description      string `json:"description"`
 	Enabled          bool   `json:"enabled"`
 	InstalledVersion string `json:"installed_version,omitempty"`
 	Name             string `json:"name"`
-	Trusted          bool   `json:"trusted"`
+	// RequiresRestart marks extensions that load a shared library, so enabling
+	// or disabling them RESTARTS the database and drops open connections for a
+	// few seconds (pg_cron, pgaudit, pg_qualstats).
+	RequiresRestart bool `json:"requires_restart,omitempty"`
+	Trusted         bool `json:"trusted"`
 	// UpdateAvailable is false for extensions CapyDB manages itself - those are
 	// kept current automatically and are not the customer's to bump.
 	UpdateAvailable bool `json:"update_available,omitempty"`
@@ -1173,6 +1179,55 @@ func (c *Client) ListProjectExtensions(ctx context.Context, projectID string) ([
 	return response.Extensions, nil
 }
 
+// IndexSuggestion is one candidate index the advisor derived from the
+// project's real query predicates.
+type IndexSuggestion struct {
+	DDL string `json:"ddl"`
+	// EstimatedSizeBytes is measured by building the index hypothetically -
+	// nothing is written to the database. Zero when the estimate is unavailable.
+	EstimatedSizeBytes int64  `json:"estimated_size_bytes,omitempty"`
+	IndexMethod        string `json:"index_method,omitempty"`
+	Table              string `json:"table,omitempty"`
+}
+
+// IndexAdvisorReport is the index advisor's answer for one project.
+type IndexAdvisorReport struct {
+	Available      bool `json:"available"`
+	MinFilter      int  `json:"min_filter"`
+	MinSelectivity int  `json:"min_selectivity"`
+	// MissingExtensions lists what to enable before the advisor can run, or
+	// before size estimates appear.
+	MissingExtensions      []string          `json:"missing_extensions"`
+	Reason                 string            `json:"reason,omitempty"`
+	SizeEstimatesAvailable bool              `json:"size_estimates_available"`
+	Suggestions            []IndexSuggestion `json:"suggestions"`
+}
+
+// GetProjectIndexAdvisor returns index suggestions derived from the predicates
+// the project's queries actually ran. Read-only: candidates are costed as
+// hypothetical indexes, so nothing is created on the database.
+func (c *Client) GetProjectIndexAdvisor(ctx context.Context, projectID string, minFilter, minSelectivity int) (IndexAdvisorReport, error) {
+	query := url.Values{}
+	if minFilter > 0 {
+		query.Set("min_filter", strconv.Itoa(minFilter))
+	}
+	if minSelectivity > 0 {
+		query.Set("min_selectivity", strconv.Itoa(minSelectivity))
+	}
+	path := "/v1/projects/" + projectID + "/advisor/indexes"
+	if len(query) > 0 {
+		path += "?" + query.Encode()
+	}
+
+	var response struct {
+		Advisor IndexAdvisorReport `json:"advisor"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return IndexAdvisorReport{}, err
+	}
+	return response.Advisor, nil
+}
+
 // EnableProjectExtension queues enabling a Postgres extension and returns the
 // async job.
 func (c *Client) EnableProjectExtension(ctx context.Context, projectID, name string) (Job, error) {
@@ -1188,30 +1243,6 @@ func (c *Client) EnableProjectExtension(ctx context.Context, projectID, name str
 
 // DisableProjectExtension queues dropping a Postgres extension and returns the
 // async job.
-// SQLQueryResult is one statement's result from the project SQL runner.
-type SQLQueryResult struct {
-	Columns    []string         `json:"columns"`
-	DurationMs int64            `json:"duration_ms"`
-	Rows       []map[string]any `json:"rows"`
-	RowCount   int              `json:"row_count"`
-	Truncated  bool             `json:"truncated"`
-}
-
-// RunProjectSQL executes a statement against the project's database through the
-// control plane. Used by `capydb doctor` for checks that can only be answered by
-// the live database - the ones a file-only linter cannot make.
-func (c *Client) RunProjectSQL(ctx context.Context, projectID, query string, maxRows int) (SQLQueryResult, error) {
-	var result SQLQueryResult
-	payload := map[string]any{"query": query}
-	if maxRows > 0 {
-		payload["max_rows"] = maxRows
-	}
-	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/sql", payload, &result); err != nil {
-		return SQLQueryResult{}, err
-	}
-	return result, nil
-}
-
 // UpdateProjectExtension bumps an already-enabled extension to the version the
 // platform provides. Customer-initiated by design: an extension's upgrade
 // scripts can change behaviour inside the customer's data. No-op when already
@@ -1248,47 +1279,6 @@ func (c *Client) MajorUpgradePreflight(ctx context.Context, projectID string, ta
 	}
 	path := fmt.Sprintf("/v1/projects/%s/upgrade/major/preflight?target_major=%d", projectID, targetMajor)
 	if err := c.do(ctx, http.MethodPost, path, nil, &response); err != nil {
-		return Job{}, err
-	}
-	return response.Job, nil
-}
-
-// UpgradeProjectMajor starts a major-version upgrade: a new database is staged
-// on targetMajor, the data is copied across and verified, and the project is
-// swapped onto it. The previous version stays available for rollback until the
-// upgrade is confirmed. Run the preflight first.
-func (c *Client) UpgradeProjectMajor(ctx context.Context, projectID string, targetMajor int) (Job, error) {
-	var response struct {
-		Job Job `json:"job"`
-	}
-	path := fmt.Sprintf("/v1/projects/%s/upgrade/major?target_major=%d", projectID, targetMajor)
-	if err := c.do(ctx, http.MethodPost, path, nil, &response); err != nil {
-		return Job{}, err
-	}
-	return response.Job, nil
-}
-
-// ConfirmProjectMajorUpgrade finalizes a major upgrade by discarding the
-// previous version retained for rollback. After this the upgrade can no longer
-// be rolled back.
-func (c *Client) ConfirmProjectMajorUpgrade(ctx context.Context, projectID string) (Job, error) {
-	var response struct {
-		Job Job `json:"job"`
-	}
-	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/upgrade/major/confirm", nil, &response); err != nil {
-		return Job{}, err
-	}
-	return response.Job, nil
-}
-
-// RollbackProjectMajorUpgrade reverts a major upgrade, pointing the project
-// back at the previous version and discarding the upgraded database. Lossless
-// while the upgrade has not been confirmed.
-func (c *Client) RollbackProjectMajorUpgrade(ctx context.Context, projectID string) (Job, error) {
-	var response struct {
-		Job Job `json:"job"`
-	}
-	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/upgrade/major/rollback", nil, &response); err != nil {
 		return Job{}, err
 	}
 	return response.Job, nil

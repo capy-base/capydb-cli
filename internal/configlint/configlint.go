@@ -101,6 +101,8 @@ func Run(root string) ([]Finding, error) {
 			findings = append(findings, lintJSSource(path, rel, env)...)
 		case strings.HasSuffix(name, ".py"):
 			findings = append(findings, lintPythonSource(path, rel, env)...)
+		case strings.HasSuffix(name, ".sql"):
+			findings = append(findings, lintSQLSource(path, rel)...)
 		}
 		return nil
 	})
@@ -473,4 +475,30 @@ func isJSLike(name string) bool {
 		}
 	}
 	return false
+}
+
+// supabaseAuthHelperPattern matches the Supabase auth helpers inside SQL
+// (policy expressions, column defaults, function bodies).
+var supabaseAuthHelperPattern = regexp.MustCompile(`\bauth\.(uid|jwt|role|email)\s*\(`)
+
+// lintSQLSource flags SQL that still calls Supabase's auth helpers. Those
+// functions do not exist outside Supabase: applying such a migration to a
+// CapyDB cell aborts the restore, and a policy that survives never matches a
+// row. The converter exists precisely for this.
+func lintSQLSource(path, rel string) []Finding {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	loc := supabaseAuthHelperPattern.FindIndex(content)
+	if loc == nil {
+		return nil
+	}
+	line := 1 + strings.Count(string(content[:loc[0]]), "\n")
+	return []Finding{{
+		Rule: "supabase_rls_unconverted", Severity: SeverityWarning,
+		File: rel, Line: line,
+		Message: "SQL calls Supabase auth helpers (auth.uid()/auth.jwt()); they do not exist outside Supabase, so this aborts an import or the policy never matches",
+		Fix:     "run `capydb migrate rls` to convert the policies to portable, vanilla Postgres",
+	}}
 }
