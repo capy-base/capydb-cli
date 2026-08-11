@@ -276,3 +276,60 @@ func TestSupabaseRLSUnconverted(t *testing.T) {
 		}
 	}
 }
+
+// A schema pinned to one major's uuidv7 spelling breaks on the other, and a
+// CapyDB major upgrade is a logical dump/restore that carries the name across.
+func TestUUIDv7NotPortable(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		want bool
+	}{
+		{"pg18 builtin", "create table t (id uuid default uuidv7());\n", true},
+		{"extension spelling", "create table t (id uuid default uuid_generate_v7());\n", true},
+		{"schema-qualified extension call", "create table t (id uuid default extensions.uuid_generate_v7());\n", true},
+		{"portable wrapper is the fix", "create table t (id uuid default capydb.uuidv7());\n", false},
+		{"unrelated sql", "create table t (id uuid default gen_random_uuid());\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := writeProject(t, map[string]string{"db/0001.sql": tc.sql})
+			findings, err := Run(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, got := rules(findings)["uuidv7_not_portable"]
+			if got != tc.want {
+				t.Fatalf("uuidv7_not_portable = %v, want %v: %+v", got, tc.want, findings)
+			}
+		})
+	}
+}
+
+// SET NOT NULL on a populated table is a write outage for the length of a full
+// scan; 18 lets it be split into NOT VALID + VALIDATE.
+func TestSetNotNullLocksTable(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		want bool
+	}{
+		{"bare set not null", "alter table users alter column email set not null;\n", true},
+		{"not valid is the fix", "alter table users add constraint email_nn not null email not valid;\n", false},
+		{"unrelated alter", "alter table users add column nickname text;\n", false},
+		{"create table not null is fine", "create table users (email text not null);\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := writeProject(t, map[string]string{"db/0002.sql": tc.sql})
+			findings, err := Run(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, got := rules(findings)["set_not_null_locks_table"]
+			if got != tc.want {
+				t.Fatalf("set_not_null_locks_table = %v, want %v: %+v", got, tc.want, findings)
+			}
+		})
+	}
+}

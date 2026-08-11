@@ -481,24 +481,98 @@ func isJSLike(name string) bool {
 // (policy expressions, column defaults, function bodies).
 var supabaseAuthHelperPattern = regexp.MustCompile(`\bauth\.(uid|jwt|role|email)\s*\(`)
 
-// lintSQLSource flags SQL that still calls Supabase's auth helpers. Those
-// functions do not exist outside Supabase: applying such a migration to a
-// CapyDB cell aborts the restore, and a policy that survives never matches a
-// row. The converter exists precisely for this.
+// rawUUIDv7Pattern matches the two major-specific spellings of a time-sortable
+// UUID generator: Postgres 18's built-in uuidv7() and the pg_uuidv7
+// extension's uuid_generate_v7(), which is what 16/17 have. A capydb-qualified
+// call is excluded by the negative lookbehind stand-in below (Go's regexp has
+// no lookbehind, so the schema prefix is captured and checked by the caller).
+var rawUUIDv7Pattern = regexp.MustCompile(`(?i)([a-z0-9_]+\s*\.\s*)?\b(uuidv7|uuid_generate_v7)\s*\(`)
+
+// notNullAlterPattern matches ALTER TABLE ... SET NOT NULL without a following
+// NOT VALID on the same statement.
+var notNullAlterPattern = regexp.MustCompile(`(?is)alter\s+table\s+[^;]*?\bset\s+not\s+null\b[^;]*;?`)
+
+// lintSQLSource runs every SQL-level rule over one file.
 func lintSQLSource(path, rel string) []Finding {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
+	findings := lintSupabaseAuthHelpers(content, rel)
+	findings = append(findings, lintRawUUIDv7(content, rel)...)
+	return append(findings, lintUnguardedSetNotNull(content, rel)...)
+}
+
+// lintSupabaseAuthHelpers flags SQL that still calls Supabase's auth helpers.
+// Those functions do not exist outside Supabase: applying such a migration to a
+// CapyDB cell aborts the restore, and a policy that survives never matches a
+// row. The converter exists precisely for this.
+func lintSupabaseAuthHelpers(content []byte, rel string) []Finding {
 	loc := supabaseAuthHelperPattern.FindIndex(content)
 	if loc == nil {
 		return nil
 	}
-	line := 1 + strings.Count(string(content[:loc[0]]), "\n")
 	return []Finding{{
 		Rule: "supabase_rls_unconverted", Severity: SeverityWarning,
-		File: rel, Line: line,
+		File: rel, Line: lineOf(content, loc[0]),
 		Message: "SQL calls Supabase auth helpers (auth.uid()/auth.jwt()); they do not exist outside Supabase, so this aborts an import or the policy never matches",
 		Fix:     "run `capydb migrate rls` to convert the policies to portable, vanilla Postgres",
 	}}
+}
+
+// lintRawUUIDv7 flags a schema pinned to one major's spelling of uuidv7.
+//
+// Postgres 18 ships uuidv7() in pg_catalog; 16 and 17 only get it from the
+// pg_uuidv7 extension, which names it uuid_generate_v7(). Either raw name in a
+// column DEFAULT is a schema that breaks on the other major - and a CapyDB
+// major upgrade is a logical dump and restore, so the qualified name travels
+// with the schema and fails on arrival. capydb.uuidv7() resolves to whatever
+// the local major provides and is stable across the upgrade.
+func lintRawUUIDv7(content []byte, rel string) []Finding {
+	for _, match := range rawUUIDv7Pattern.FindAllSubmatchIndex(content, -1) {
+		// Group 1 is the optional schema qualifier; a capydb-qualified call is
+		// the fix, not the problem.
+		if match[2] >= 0 {
+			qualifier := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(
+				strings.TrimSpace(string(content[match[2]:match[3]])), ".")))
+			if qualifier == "capydb" {
+				continue
+			}
+		}
+		return []Finding{{
+			Rule: "uuidv7_not_portable", Severity: SeverityWarning,
+			File: rel, Line: lineOf(content, match[0]),
+			Message: "SQL calls uuidv7()/uuid_generate_v7() directly; the built-in exists only on Postgres 18 and the extension spelling only on 16/17, so this schema breaks on the other major",
+			Fix:     "call capydb.uuidv7() instead - it resolves to the built-in on 18 and to an equivalent on 16/17",
+		}}
+	}
+	return nil
+}
+
+// lintUnguardedSetNotNull flags SET NOT NULL without NOT VALID.
+//
+// Adding NOT NULL to a populated table takes ACCESS EXCLUSIVE and scans every
+// row before it returns; on a live table that is a write outage for the
+// duration. Postgres 18 allows the constraint to be added NOT VALID and
+// validated afterwards under a weaker lock, which turns the outage into two
+// cheap steps.
+func lintUnguardedSetNotNull(content []byte, rel string) []Finding {
+	for _, loc := range notNullAlterPattern.FindAllIndex(content, -1) {
+		statement := strings.ToLower(string(content[loc[0]:loc[1]]))
+		if strings.Contains(statement, "not valid") {
+			continue
+		}
+		return []Finding{{
+			Rule: "set_not_null_locks_table", Severity: SeverityWarning,
+			File: rel, Line: lineOf(content, loc[0]),
+			Message: "ALTER TABLE ... SET NOT NULL takes ACCESS EXCLUSIVE and scans the whole table, blocking writes until it finishes",
+			Fix:     "on Postgres 18, add the constraint NOT VALID first and run ALTER TABLE ... VALIDATE CONSTRAINT afterwards, which does not block writes",
+		}}
+	}
+	return nil
+}
+
+// lineOf converts a byte offset into a 1-based line number.
+func lineOf(content []byte, offset int) int {
+	return 1 + strings.Count(string(content[:offset]), "\n")
 }
