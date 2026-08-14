@@ -1,6 +1,6 @@
 module github.com/capy-base/capydb/cli
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/capy-base/capydbclient v1.5.0
