@@ -1,6 +1,7 @@
 package configlint
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,9 +18,7 @@ func writeProject(t *testing.T, files map[string]string) string {
 		".env": "DATABASE_URL=postgres://u:p@db.capydb.dev:6432/app?sslmode=require\n" +
 			"DATABASE_DIRECT_URL=postgres://u:p@db.capydb.dev:5432/app?sslmode=require\n",
 	}
-	for name, body := range files {
-		base[name] = body
-	}
+	maps.Copy(base, files)
 	for name, body := range base {
 		path := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

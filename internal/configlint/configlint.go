@@ -151,7 +151,7 @@ func readEnvURLs(root string) (map[string]envURL, error) {
 		if readErr != nil {
 			return nil
 		}
-		for _, line := range strings.Split(string(data), "\n") {
+		for line := range strings.SplitSeq(string(data), "\n") {
 			trimmed := strings.TrimSpace(line)
 			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 				continue

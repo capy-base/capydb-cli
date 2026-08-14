@@ -133,21 +133,21 @@ const pool = new Pool({ options: '-c search_path=tenant' });
 	if len(report.Changes) != 0 {
 		t.Errorf("detection must be warn-only, got changes: %+v", report.Changes)
 	}
-	joined := ""
+	var joined strings.Builder
 	for _, note := range report.Manual {
-		joined += note.Reason + "\n"
+		joined.WriteString(note.Reason + "\n")
 	}
-	if !strings.Contains(joined, "connection.statement_timeout") || !strings.Contains(joined, "never applies it") {
-		t.Errorf("missing ignored-GUC warning, got:\n%s", joined)
+	if !strings.Contains(joined.String(), "connection.statement_timeout") || !strings.Contains(joined.String(), "never applies it") {
+		t.Errorf("missing ignored-GUC warning, got:\n%s", joined.String())
 	}
-	if !strings.Contains(joined, "ALTER ROLE") {
-		t.Errorf("warning must carry the ALTER ROLE remediation, got:\n%s", joined)
+	if !strings.Contains(joined.String(), "ALTER ROLE") {
+		t.Errorf("warning must carry the ALTER ROLE remediation, got:\n%s", joined.String())
 	}
-	if !strings.Contains(joined, "-c search_path") {
-		t.Errorf("missing libpq options warning, got:\n%s", joined)
+	if !strings.Contains(joined.String(), "-c search_path") {
+		t.Errorf("missing libpq options warning, got:\n%s", joined.String())
 	}
-	if strings.Contains(joined, "application_name") {
-		t.Errorf("application_name is pooler-tracked and must not warn, got:\n%s", joined)
+	if strings.Contains(joined.String(), "application_name") {
+		t.Errorf("application_name is pooler-tracked and must not warn, got:\n%s", joined.String())
 	}
 }
 

@@ -579,8 +579,8 @@ func scanSourceFile(path, relative string, facts *RepoFacts) {
 // https://<ref>.supabase.co, postgres.<ref>@pooler...), so match on the bare
 // project ref rather than one synthesized hostname.
 func consumerSearchToken(hostname string) string {
-	if strings.HasSuffix(hostname, ".supabase.co") {
-		trimmed := strings.TrimSuffix(hostname, ".supabase.co")
+	if before, ok := strings.CutSuffix(hostname, ".supabase.co"); ok {
+		trimmed := before
 		trimmed = strings.TrimPrefix(trimmed, "db.")
 		if trimmed != "" && !strings.Contains(trimmed, ".") {
 			return trimmed
