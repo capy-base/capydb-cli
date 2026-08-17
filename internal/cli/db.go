@@ -52,6 +52,27 @@ func (a *app) resolveConnectionURL(cmd *cobra.Command, pooled bool, previewID, p
 	return connections.DirectURL, nil
 }
 
+// psqlConnectionURL makes an issued connection URL usable by psql out of the box.
+// Issued URLs carry sslmode=verify-full, but libpq does not read the OS trust
+// store by default (it wants ~/.postgresql/root.crt), so bare psql fails with
+// "root certificate file does not exist". sslrootcert=system (libpq 16+) points
+// it at the system roots; it is consumed locally and never sent to the server.
+// URLs that already pin an sslrootcert, or that don't verify, pass through as-is.
+func psqlConnectionURL(connectionURL string) string {
+	if strings.Contains(connectionURL, "sslrootcert=") {
+		return connectionURL
+	}
+	if !strings.Contains(connectionURL, "sslmode=verify-full") &&
+		!strings.Contains(connectionURL, "sslmode=verify-ca") {
+		return connectionURL
+	}
+	separator := "?"
+	if strings.Contains(connectionURL, "?") {
+		separator = "&"
+	}
+	return connectionURL + separator + "sslrootcert=system"
+}
+
 func (a *app) newConnectionStringCommand() *cobra.Command {
 	var pooled bool
 	var previewID string
@@ -98,6 +119,7 @@ func (a *app) newPsqlCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			connectionURL = psqlConnectionURL(connectionURL)
 
 			psqlPath, err := exec.LookPath("psql")
 			if err != nil {
