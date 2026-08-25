@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -101,20 +102,12 @@ func writeAlertTable(out io.Writer, alerts []api.ProjectAlert) {
 			alert.ID,
 			alert.Kind,
 			alert.Severity,
-			formatAlertValue(alert.ObservedValue),
-			formatAlertValue(alert.LimitValue),
+			strconv.FormatInt(alert.ObservedValue, 10),
+			strconv.FormatInt(alert.LimitValue, 10),
 			formatTime(alert.TriggeredAt),
 			formatOptionalTime(alert.ResolvedAt),
 			formatOptionalTime(alert.AcknowledgedAt),
 		)
 	}
 	_ = writer.Flush()
-}
-
-// formatAlertValue renders an alert measurement without trailing decimal noise.
-func formatAlertValue(value float64) string {
-	if value == float64(int64(value)) {
-		return fmt.Sprintf("%d", int64(value))
-	}
-	return fmt.Sprintf("%.2f", value)
 }

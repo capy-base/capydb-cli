@@ -77,7 +77,7 @@ func (a *app) runDoctor(cmd *cobra.Command, args []string) error {
 			checks = append(checks, doctorCheck{Name: "auth", Status: doctorFail, Detail: clientErr.Error()})
 			break
 		}
-		viewer, viewerErr := client.GetViewerResponse(ctx)
+		viewer, viewerErr := client.GetViewer(ctx)
 		if viewerErr != nil {
 			checks = append(checks, doctorCheck{Name: "auth", Status: doctorFail, Detail: fmt.Sprintf("api key rejected: %v", viewerErr)})
 			break

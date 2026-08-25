@@ -43,6 +43,20 @@ type netlifyEnvPayload struct {
 	Values   []netlifyEnvValue `json:"values"`
 }
 
+// wranglerHyperdriveBinding is one entry of wrangler.jsonc's `hyperdrive` array.
+type wranglerHyperdriveBinding struct {
+	Binding string `json:"binding"`
+	ID      string `json:"id"`
+}
+
+// wranglerPayload is a paste-ready wrangler.jsonc fragment. Only the Hyperdrive
+// binding travels here: connection strings are secrets and belong in `.dev.vars`
+// or `wrangler secret`, never in a file that gets committed.
+type wranglerPayload struct {
+	CompatibilityFlags []string                    `json:"compatibility_flags"`
+	Hyperdrive         []wranglerHyperdriveBinding `json:"hyperdrive"`
+}
+
 func (a *app) newIntegrationsCommand() *cobra.Command {
 	command := &cobra.Command{
 		Use:   "integrations",
@@ -77,8 +91,15 @@ func (a *app) newIntegrationsCommand() *cobra.Command {
 				writeJSONPayload(cmd, buildVercelEnvPayload(plan.Vars, branch))
 			case "netlify":
 				writeJSONPayload(cmd, buildNetlifyEnvPayload(plan.Vars, netlifyContext))
+			case "wrangler", "cloudflare":
+				payload, hint, err := a.buildWranglerPayload(ctx, client, resolvedProject.ID, plan.Vars)
+				if err != nil {
+					return err
+				}
+				writeJSONPayload(cmd, payload)
+				_, _ = fmt.Fprint(cmd.ErrOrStderr(), hint)
 			default:
-				return fmt.Errorf("--target must be dotenv, json, vercel, or netlify")
+				return fmt.Errorf("--target must be dotenv, json, vercel, netlify, or wrangler")
 			}
 
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "project: %s (%s)\n", resolvedProject.Name, resolvedProject.ID)
@@ -87,7 +108,7 @@ func (a *app) newIntegrationsCommand() *cobra.Command {
 	}
 
 	envCommand.Flags().StringVar(&projectRef, "project", "", "Project id, slug, or name")
-	envCommand.Flags().StringVar(&target, "target", "dotenv", "Output target: dotenv, json, vercel, or netlify")
+	envCommand.Flags().StringVar(&target, "target", "dotenv", "Output target: dotenv, json, vercel, netlify, or wrangler")
 	envCommand.Flags().StringVar(&branch, "branch", "", "Vercel preview branch for branch-scoped env vars")
 	envCommand.Flags().StringVar(&netlifyContext, "netlify-context", "all", "Netlify context: all, dev, branch-deploy, deploy-preview, production, or branch")
 
@@ -183,6 +204,109 @@ func buildNetlifyEnvPayload(vars map[string]string, contextName string) []netlif
 		})
 	}
 	return payload
+}
+
+// cloudflareIntegrationConfig is the slice of the Cloudflare integration's
+// config the CLI needs. KEEP IN LOCKSTEP with the keys the backend writes in
+// service.ConnectCloudflareIntegration / worker.syncCloudflareEnv.
+type cloudflareIntegrationConfig struct {
+	Hyperdrive        bool   `json:"hyperdrive"`
+	HyperdriveBinding string `json:"hyperdrive_binding"`
+	HyperdriveID      string `json:"hyperdrive_id"`
+	Target            string `json:"target"`
+}
+
+// buildWranglerPayload fetches the project's integrations and renders the
+// Cloudflare one as a wrangler.jsonc fragment.
+func (a *app) buildWranglerPayload(
+	ctx context.Context,
+	client *api.Client,
+	projectID string,
+	vars map[string]string,
+) (wranglerPayload, string, error) {
+	integrations, err := client.ListProjectIntegrations(ctx, projectID)
+	if err != nil {
+		return wranglerPayload{}, "", fmt.Errorf("fetch project integrations: %w", err)
+	}
+	return wranglerPayloadFromIntegrations(integrations, vars)
+}
+
+// wranglerPayloadFromIntegrations turns the project's Cloudflare integration
+// into a wrangler.jsonc fragment. The Hyperdrive id only exists once the
+// connect sync has run, so a project without one gets an actionable error
+// rather than a snippet carrying a placeholder id that fails at deploy time.
+func wranglerPayloadFromIntegrations(
+	integrations []api.ProjectIntegration,
+	vars map[string]string,
+) (wranglerPayload, string, error) {
+	var config cloudflareIntegrationConfig
+	found := false
+	for _, integration := range integrations {
+		if integration.Provider != "cloudflare" || integration.State != "active" {
+			continue
+		}
+		found = true
+		if len(integration.Config) > 0 {
+			if err := json.Unmarshal(integration.Config, &config); err != nil {
+				return wranglerPayload{}, "", fmt.Errorf("decode cloudflare integration config: %w", err)
+			}
+		}
+		break
+	}
+
+	switch {
+	case !found:
+		return wranglerPayload{}, "", fmt.Errorf(
+			"no active Cloudflare integration on this project; connect one in the dashboard (Settings -> Integrations -> Cloudflare) first",
+		)
+	case !config.Hyperdrive:
+		return wranglerPayload{}, "", fmt.Errorf(
+			"the Cloudflare integration on this project was connected without Hyperdrive; reconnect it with Hyperdrive enabled",
+		)
+	case config.HyperdriveID == "":
+		return wranglerPayload{}, "", fmt.Errorf(
+			"the Hyperdrive config is still being created; re-run once the connect job finishes",
+		)
+	}
+
+	binding := config.HyperdriveBinding
+	if binding == "" {
+		binding = defaultHyperdriveBinding
+	}
+	payload := wranglerPayload{
+		// Postgres drivers need Node.js APIs in both Workers and Pages Functions.
+		CompatibilityFlags: []string{"nodejs_compat"},
+		Hyperdrive:         []wranglerHyperdriveBinding{{Binding: binding, ID: config.HyperdriveID}},
+	}
+	return payload, wranglerLocalDevHint(binding, vars), nil
+}
+
+// defaultHyperdriveBinding mirrors integrations.CloudflareHyperdriveBindingName
+// in the backend: the variable name CapyDB binds Hyperdrive to.
+const defaultHyperdriveBinding = "HYPERDRIVE"
+
+// wranglerLocalDevHint tells the reader how to make `wrangler dev` talk to the
+// same database, which needs a direct connection under a binding-specific name.
+func wranglerLocalDevHint(binding string, vars map[string]string) string {
+	directURL := firstNonEmptyVar(vars, "DATABASE_DIRECT_URL", "DATABASE_URL")
+	if directURL == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"\nMerge the fragment above into wrangler.jsonc. For `wrangler dev`, export:\n"+
+			"  CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_%s=%s\n",
+		binding,
+		quoteEnvValue(directURL),
+	)
+}
+
+func firstNonEmptyVar(vars map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(vars[key]); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func sortedEnvKeys(vars map[string]string) []string {

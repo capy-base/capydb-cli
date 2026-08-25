@@ -32,91 +32,48 @@ type Organization = capydbclient.Organization
 
 type Viewer = capydbclient.Viewer
 
-type ViewerPrincipal struct {
-	AuthSource            string   `json:"auth_source"`
-	ClerkOrganizationID   string   `json:"clerk_organization_id,omitempty"`
-	ClerkOrganizationRole string   `json:"clerk_organization_role,omitempty"`
-	ClerkOrganizationSlug string   `json:"clerk_organization_slug,omitempty"`
-	IsAdmin               bool     `json:"is_admin"`
-	OrganizationID        string   `json:"organization_id,omitempty"`
-	Scopes                []string `json:"scopes"`
-	UserID                string   `json:"user_id,omitempty"`
-}
-
-type ViewerResponse struct {
-	Organization *Organization   `json:"organization"`
-	Principal    ViewerPrincipal `json:"principal"`
-}
-
-type CLILoginSessionStart struct {
-	ExpiresAt time.Time `json:"expires_at"`
-	PollToken string    `json:"poll_token"`
-	SessionID string    `json:"session_id"`
-	State     string    `json:"state"`
-}
-
-type CLILoginSessionStartRequest struct {
-	DeviceName string     `json:"device_name,omitempty"`
-	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
-	Name       string     `json:"name,omitempty"`
-	// Scopes narrows the minted key to a subset of the device-login scope set;
-	// it can never widen it. Empty requests the full set.
-	Scopes []string `json:"scopes,omitempty"`
-	// Source labels who drives the login ("cli" or "agent"); it is shown on
-	// the consent screen and the dashboard key list.
-	Source string `json:"source,omitempty"`
-}
-
-type CLILoginSessionStatus struct {
-	AuthorizedAt     *time.Time `json:"authorized_at,omitempty"`
-	ExpiresAt        time.Time  `json:"expires_at"`
-	OrganizationID   string     `json:"organization_id,omitempty"`
-	OrganizationName string     `json:"organization_name,omitempty"`
-	OrganizationSlug string     `json:"organization_slug,omitempty"`
-	PlaintextAPIKey  string     `json:"plaintext_api_key,omitempty"`
-	SessionID        string     `json:"session_id"`
-	State            string     `json:"state"`
-}
+// The control-plane entities and request bodies below are aliases of the shared
+// capydbclient module (the single Go mirror of the OpenAPI component schemas),
+// so the CLI and the Terraform provider cannot drift from each other or from
+// the API. Names follow the schema names; a few keep a shorter CLI-facing
+// alias where the command output already uses that word.
+type (
+	ActiveQuery                        = capydbclient.ActiveQuerySample
+	Backup                             = capydbclient.Backup
+	CLILoginSessionStart               = capydbclient.CLILoginSessionStartResponse
+	CLILoginSessionStartRequest        = capydbclient.CLILoginSessionStartRequest
+	CLILoginSessionStatus              = capydbclient.CLILoginSessionPollResponse
+	CreateImportRequest                = capydbclient.CreateImportRequest
+	CreateRestorePointRequest          = capydbclient.CreateRestorePointRequest
+	CreateRestoreRequest               = capydbclient.CreateRestoreRequest
+	ImportPreflight                    = capydbclient.ImportPreflightResult
+	ImportPreflightCheck               = capydbclient.ImportPreflightCheck
+	ImportPreflightExtension           = capydbclient.SourceExtension
+	ImportPreflightForeignKey          = capydbclient.SourceForeignKey
+	ImportPreflightSource              = capydbclient.SourceInspection
+	ImportUpload                       = capydbclient.ImportUpload
+	IndexAdvisorReport                 = capydbclient.IndexAdvisorReport
+	IndexSuggestion                    = capydbclient.IndexSuggestion
+	Preview                            = capydbclient.PreviewDatabase
+	ProjectAlert                       = capydbclient.ProjectAlert
+	ProjectAuditEvent                  = capydbclient.ProjectAuditEvent
+	ProjectExtension                   = capydbclient.ProjectExtensionStatus
+	ProjectIntegration                 = capydbclient.ProjectIntegration
+	ProjectLogEntry                    = capydbclient.ProjectLogEntry
+	ProjectLogs                        = capydbclient.ProjectLogs
+	ProjectObservability               = capydbclient.ProjectObservability
+	ProvisionCloudflareDatabaseRequest = capydbclient.ProvisionCloudflareDatabaseRequest
+	ProvisionCloudflareDatabaseResult  = capydbclient.ProvisionCloudflareDatabaseResponse
+	PublicStatusComponent              = capydbclient.StatusComponent
+	PublicStatusResponse               = capydbclient.StatusResponse
+	RestorePoint                       = capydbclient.RestorePoint
+	SQLResult                          = capydbclient.SQLQueryResult
+	ScheduledBackup                    = capydbclient.ScheduledBackup
+	SlowQuery                          = capydbclient.SlowQuerySample
+	UpsertScheduledBackupRequest       = capydbclient.UpsertScheduledBackupRequest
+)
 
 type CreatePreviewRequest = capydbclient.CreatePreviewRequest
-
-type CreateRestoreRequest struct {
-	AllowUnverifiedBackup   bool   `json:"allow_unverified_backup,omitempty"`
-	BackupKey               string `json:"backup_key,omitempty"`
-	ConfirmProjectOverwrite bool   `json:"confirm_project_overwrite,omitempty"`
-	PreviewID               string `json:"preview_id,omitempty"`
-	PreviewName             string `json:"preview_name,omitempty"`
-	Recreate                bool   `json:"recreate,omitempty"`
-	RestorePointID          string `json:"restore_point_id,omitempty"`
-	RestoreTime             string `json:"restore_time,omitempty"`
-	TargetKind              string `json:"target_kind,omitempty"`
-	TTLHours                int    `json:"ttl_hours,omitempty"`
-}
-
-type RestorePoint struct {
-	BackupID           string     `json:"backup_id,omitempty"`
-	BackupKey          string     `json:"backup_key,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	CreatedByActorID   string     `json:"created_by_actor_id,omitempty"`
-	CreatedByActorKind string     `json:"created_by_actor_kind"`
-	ID                 string     `json:"id"`
-	Kind               string     `json:"kind"`
-	Label              string     `json:"label"`
-	Note               string     `json:"note,omitempty"`
-	OrganizationID     string     `json:"organization_id"`
-	PITRTime           *time.Time `json:"pitr_time,omitempty"`
-	ProjectID          string     `json:"project_id"`
-	State              string     `json:"state"`
-	UpdatedAt          time.Time  `json:"updated_at"`
-}
-
-type CreateRestorePointRequest struct {
-	BackupKey string `json:"backup_key,omitempty"`
-	Kind      string `json:"kind,omitempty"`
-	Label     string `json:"label"`
-	Note      string `json:"note,omitempty"`
-	PITRTime  string `json:"pitr_time,omitempty"`
-}
 
 type Job = capydbclient.Job
 
@@ -146,154 +103,9 @@ type ProjectConnectionInfo = ConnectionInfo
 
 type PreviewConnectionInfo = ConnectionInfo
 
-type Preview struct {
-	CreatedAt      time.Time `json:"created_at"`
-	DatabaseName   string    `json:"database_name"`
-	DirectPort     int       `json:"direct_port"`
-	ID             string    `json:"id"`
-	LastError      string    `json:"last_error,omitempty"`
-	Mode           string    `json:"mode"`
-	Name           string    `json:"name"`
-	PooledPort     int       `json:"pooled_port"`
-	ProjectID      string    `json:"project_id"`
-	PublicHost     string    `json:"public_host,omitempty"`
-	RoleName       string    `json:"role_name"`
-	SourceDatabase string    `json:"source_database,omitempty"`
-	SSLMode        string    `json:"ssl_mode,omitempty"`
-	State          string    `json:"state"`
-	TTLExpiresAt   time.Time `json:"ttl_expires_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
-}
-
 type PreviewDetails struct {
 	Connections PreviewConnectionInfo `json:"connections"`
 	Preview     Preview               `json:"preview"`
-}
-
-type Backup struct {
-	BackupKey         string    `json:"backup_key"`
-	CreatedAt         time.Time `json:"created_at"`
-	DatabaseName      string    `json:"database_name"`
-	ID                string    `json:"id"`
-	Label             string    `json:"label,omitempty"`
-	ProjectID         string    `json:"project_id"`
-	SizeBytes         int64     `json:"size_bytes"`
-	State             string    `json:"state"`
-	VerificationState string    `json:"verification_state"`
-}
-
-// ScheduledBackup is the project's recurring daily backup configuration.
-type ScheduledBackup struct {
-	CreatedAt     time.Time  `json:"created_at"`
-	CronHour      int        `json:"cron_hour"`
-	CronMinute    int        `json:"cron_minute"`
-	ID            string     `json:"id"`
-	IsActive      bool       `json:"is_active"`
-	Label         string     `json:"label,omitempty"`
-	LastJobID     string     `json:"last_job_id,omitempty"`
-	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
-	ProjectID     string     `json:"project_id"`
-	RetentionDays int        `json:"retention_days"`
-	UpdatedAt     time.Time  `json:"updated_at"`
-}
-
-// UpsertScheduledBackupRequest configures the project's single default
-// schedule. RetentionDays of 0 lets the server apply its default.
-type UpsertScheduledBackupRequest struct {
-	CronHour      int    `json:"cron_hour"`
-	CronMinute    int    `json:"cron_minute"`
-	IsActive      bool   `json:"is_active"`
-	Label         string `json:"label,omitempty"`
-	RetentionDays int    `json:"retention_days,omitempty"`
-}
-
-type PublicStatusComponent struct {
-	Message string `json:"message,omitempty"`
-	Name    string `json:"name"`
-	Status  string `json:"status"`
-}
-
-type PublicStatusResponse struct {
-	Components []PublicStatusComponent `json:"components"`
-	Service    string                  `json:"service"`
-	Status     string                  `json:"status"`
-	UpdatedAt  time.Time               `json:"updated_at"`
-}
-
-type ActiveQuery struct {
-	PID           int     `json:"pid"`
-	Username      string  `json:"username"`
-	State         string  `json:"state"`
-	DurationMs    float64 `json:"duration_ms"`
-	Query         string  `json:"query"`
-	WaitEvent     string  `json:"wait_event,omitempty"`
-	WaitEventType string  `json:"wait_event_type,omitempty"`
-}
-
-type SlowQuery struct {
-	Calls       int64   `json:"calls"`
-	Rows        int64   `json:"rows"`
-	TotalTimeMs float64 `json:"total_time_ms"`
-	MeanTimeMs  float64 `json:"mean_time_ms"`
-	Query       string  `json:"query"`
-}
-
-type ProjectObservability struct {
-	ActiveQueries          []ActiveQuery `json:"active_queries"`
-	Alerts                 []string      `json:"alerts"`
-	ConnectionCount        int           `json:"connection_count"`
-	ConnectionLimit        int           `json:"connection_limit"`
-	ConnectionUsagePercent float64       `json:"connection_usage_percent"`
-	DatabaseSizeBytes      int64         `json:"database_size_bytes"`
-	PgStatStatements       bool          `json:"pg_stat_statements"`
-	SlowQueries            []SlowQuery   `json:"slow_queries"`
-	StorageLimitBytes      int64         `json:"storage_limit_bytes"`
-	StorageUsagePercent    float64       `json:"storage_usage_percent"`
-}
-
-type SQLResult struct {
-	Columns    []string         `json:"columns"`
-	Rows       []map[string]any `json:"rows"`
-	RowCount   int              `json:"row_count"`
-	DurationMs float64          `json:"duration_ms"`
-	Truncated  bool             `json:"truncated"`
-}
-
-type ImportPreflightCheck struct {
-	Name   string `json:"name"`
-	Status string `json:"status"`
-	Detail string `json:"detail,omitempty"`
-}
-
-type ImportPreflightExtension struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-}
-
-type ImportPreflightForeignKey struct {
-	Constraint  string `json:"constraint"`
-	SourceTable string `json:"source_table"`
-	TargetTable string `json:"target_table"`
-}
-
-type ImportPreflightSource struct {
-	ServerVersion     string                     `json:"server_version"`
-	DatabaseSizeBytes int64                      `json:"database_size_bytes"`
-	Extensions        []ImportPreflightExtension `json:"extensions"`
-	// Provider-coupling facts (Supabase-style sources): schemas beyond public,
-	// FKs into provider-managed schemas, and tables with auth-bound RLS.
-	AppSchemas               []string                    `json:"app_schemas,omitempty"`
-	ProviderSchemas          []string                    `json:"provider_schemas,omitempty"`
-	ProviderAuthFKs          []ImportPreflightForeignKey `json:"provider_auth_fks,omitempty"`
-	ProviderAuthPolicyTables []string                    `json:"provider_auth_policy_tables,omitempty"`
-}
-
-type ImportPreflight struct {
-	OK                bool                   `json:"ok"`
-	Checks            []ImportPreflightCheck `json:"checks"`
-	Source            ImportPreflightSource  `json:"source"`
-	StorageLimitBytes int64                  `json:"storage_limit_bytes"`
-	TargetVersion     string                 `json:"target_version"`
 }
 
 // APIKey is an organization (or project-scoped) API key. Plaintext secrets
@@ -307,55 +119,6 @@ type WebhookEndpoint = capydbclient.WebhookEndpoint
 type CreateWebhookEndpointRequest = capydbclient.CreateWebhookEndpointRequest
 
 type WebhookDelivery = capydbclient.WebhookDelivery
-
-type ProjectAuditEvent struct {
-	Action         string    `json:"action"`
-	ActorID        string    `json:"actor_id,omitempty"`
-	ActorKind      string    `json:"actor_kind"`
-	CreatedAt      time.Time `json:"created_at"`
-	ID             string    `json:"id"`
-	Metadata       any       `json:"metadata"`
-	OrganizationID string    `json:"organization_id"`
-	ProjectID      string    `json:"project_id,omitempty"`
-}
-
-// ProjectExtension describes a Postgres extension and whether it is enabled
-// for the project database.
-type ProjectExtension struct {
-	// AvailableVersion is what the platform now provides; InstalledVersion is
-	// what this database actually has. CREATE EXTENSION pins the version present
-	// at the time, so the two diverge after a platform package upgrade until the
-	// customer applies an update.
-	AvailableVersion string `json:"available_version,omitempty"`
-	// Category groups the extension in listings (core, ai, search, ...).
-	Category         string `json:"category,omitempty"`
-	DefaultVersion   string `json:"default_version"`
-	Description      string `json:"description"`
-	Enabled          bool   `json:"enabled"`
-	InstalledVersion string `json:"installed_version,omitempty"`
-	Name             string `json:"name"`
-	// RequiresRestart marks extensions that load a shared library, so enabling
-	// or disabling them RESTARTS the database and drops open connections for a
-	// few seconds (pg_cron, pgaudit, pg_qualstats).
-	RequiresRestart bool `json:"requires_restart,omitempty"`
-	Trusted         bool `json:"trusted"`
-	// UpdateAvailable is false for extensions CapyDB manages itself - those are
-	// kept current automatically and are not the customer's to bump.
-	UpdateAvailable bool `json:"update_available,omitempty"`
-}
-
-// ProjectAlert is a triggered resource alert (storage, connections, …) for a
-// project database.
-type ProjectAlert struct {
-	AcknowledgedAt *time.Time `json:"acknowledged_at,omitempty"`
-	ID             string     `json:"id"`
-	Kind           string     `json:"kind"`
-	LimitValue     float64    `json:"limit_value"`
-	ObservedValue  float64    `json:"observed_value"`
-	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
-	Severity       string     `json:"severity"`
-	TriggeredAt    time.Time  `json:"triggered_at"`
-}
 
 const defaultHTTPTimeout = 30 * time.Second
 
@@ -451,14 +214,6 @@ func (c *Client) GetViewer(ctx context.Context) (Viewer, error) {
 	return response, nil
 }
 
-func (c *Client) GetViewerResponse(ctx context.Context) (ViewerResponse, error) {
-	var response ViewerResponse
-	if err := c.do(ctx, http.MethodGet, "/v1/me", nil, &response); err != nil {
-		return ViewerResponse{}, err
-	}
-	return response, nil
-}
-
 func (c *Client) StartCLILoginSession(ctx context.Context, request CLILoginSessionStartRequest) (CLILoginSessionStart, error) {
 	var response CLILoginSessionStart
 	if err := c.do(ctx, http.MethodPost, "/v1/cli/login/sessions", request, &response); err != nil {
@@ -494,17 +249,6 @@ func (c *Client) CreateBackup(ctx context.Context, projectID, label string) (Job
 		return Job{}, err
 	}
 	return response.Job, nil
-}
-
-// CreateImportRequest starts an import from exactly one of a live source
-// connection URL or a previously uploaded dump file's object key. Confirm is
-// required by the API (an import writes over the project's live database);
-// the command sets it only after its own typed-name gate.
-type CreateImportRequest struct {
-	Confirm   bool   `json:"confirm"`
-	Recreate  bool   `json:"recreate,omitempty"`
-	SourceURL string `json:"source_url,omitempty"`
-	UploadKey string `json:"upload_key,omitempty"`
 }
 
 func (c *Client) CreateImport(ctx context.Context, projectID string, request CreateImportRequest) (Job, error) {
@@ -585,13 +329,6 @@ func (c *Client) ImportFollowAbort(ctx context.Context, projectID string) (Job, 
 		return Job{}, err
 	}
 	return response.Job, nil
-}
-
-// ImportUpload is a presigned object-storage PUT slot for a pg_dump file.
-type ImportUpload struct {
-	ExpiresAt time.Time `json:"expires_at"`
-	ObjectKey string    `json:"object_key"`
-	UploadURL string    `json:"upload_url"`
 }
 
 // CreateImportUpload requests a presigned upload URL for a dump file destined
@@ -762,23 +499,6 @@ func (c *Client) ListProjectJobs(ctx context.Context, projectID string, limit in
 	return response.Jobs, nil
 }
 
-// ProjectLogEntry is one database log line: journal timestamp, severity parsed
-// from the Postgres log format, message, and the cursor that resumes a tail
-// strictly after this entry.
-type ProjectLogEntry struct {
-	Timestamp time.Time `json:"timestamp"`
-	Severity  string    `json:"severity"`
-	Message   string    `json:"message"`
-	Cursor    string    `json:"cursor"`
-}
-
-// ProjectLogs is one log fetch: entries ascending by time plus the cursor to
-// resume a tail from (empty when the fetch returned nothing).
-type ProjectLogs struct {
-	Entries    []ProjectLogEntry `json:"entries"`
-	NextCursor string            `json:"next_cursor,omitempty"`
-}
-
 // ProjectLogsQuery parameterizes one log fetch. Cursor (tail mode) takes
 // precedence over Hours (window mode).
 type ProjectLogsQuery struct {
@@ -835,6 +555,27 @@ func (c *Client) GetProjectConnection(ctx context.Context, projectID string) (Pr
 		return ProjectConnectionInfo{}, err
 	}
 	return response.Connections, nil
+}
+
+func (c *Client) ListProjectIntegrations(ctx context.Context, projectID string) ([]ProjectIntegration, error) {
+	var response struct {
+		Integrations []ProjectIntegration `json:"integrations"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/projects/"+projectID+"/integrations", nil, &response); err != nil {
+		return nil, err
+	}
+	return capydbclient.NormalizeList(response.Integrations), nil
+}
+
+// ProvisionCloudflareDatabase creates a Cloudflare-billed database. It is the
+// one call that carries no CapyDB credential: the Cloudflare signature is the
+// authentication, verified by the control plane.
+func (c *Client) ProvisionCloudflareDatabase(ctx context.Context, request ProvisionCloudflareDatabaseRequest) (ProvisionCloudflareDatabaseResult, error) {
+	var result ProvisionCloudflareDatabaseResult
+	if err := c.do(ctx, http.MethodPost, "/v1/integrations/cloudflare/databases", request, &result); err != nil {
+		return ProvisionCloudflareDatabaseResult{}, err
+	}
+	return result, nil
 }
 
 func (c *Client) GetProjectObservability(ctx context.Context, projectID string) (ProjectObservability, error) {
@@ -1177,30 +918,6 @@ func (c *Client) ListProjectExtensions(ctx context.Context, projectID string) ([
 		return nil, err
 	}
 	return response.Extensions, nil
-}
-
-// IndexSuggestion is one candidate index the advisor derived from the
-// project's real query predicates.
-type IndexSuggestion struct {
-	DDL string `json:"ddl"`
-	// EstimatedSizeBytes is measured by building the index hypothetically -
-	// nothing is written to the database. Zero when the estimate is unavailable.
-	EstimatedSizeBytes int64  `json:"estimated_size_bytes,omitempty"`
-	IndexMethod        string `json:"index_method,omitempty"`
-	Table              string `json:"table,omitempty"`
-}
-
-// IndexAdvisorReport is the index advisor's answer for one project.
-type IndexAdvisorReport struct {
-	Available      bool `json:"available"`
-	MinFilter      int  `json:"min_filter"`
-	MinSelectivity int  `json:"min_selectivity"`
-	// MissingExtensions lists what to enable before the advisor can run, or
-	// before size estimates appear.
-	MissingExtensions      []string          `json:"missing_extensions"`
-	Reason                 string            `json:"reason,omitempty"`
-	SizeEstimatesAvailable bool              `json:"size_estimates_available"`
-	Suggestions            []IndexSuggestion `json:"suggestions"`
 }
 
 // GetProjectIndexAdvisor returns index suggestions derived from the predicates

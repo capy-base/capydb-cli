@@ -419,7 +419,7 @@ func TestAlertsListAndAcknowledge(t *testing.T) {
 					"id":             "alert_1",
 					"kind":           "storage",
 					"severity":       "warning",
-					"observed_value": 91.5,
+					"observed_value": 92,
 					"limit_value":    90,
 					"triggered_at":   "2026-06-01T08:00:00Z",
 				}},
@@ -442,7 +442,7 @@ func TestAlertsListAndAcknowledge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute alerts list: %v", err)
 	}
-	if !strings.Contains(output, "alert_1") || !strings.Contains(output, "storage") || !strings.Contains(output, "91.50") {
+	if !strings.Contains(output, "alert_1") || !strings.Contains(output, "storage") || !strings.Contains(output, "92") {
 		t.Fatalf("unexpected output:\n%s", output)
 	}
 

@@ -504,11 +504,11 @@ func TestStudioPrintOnlyUsesLinkedProjectWithoutAPIKey(t *testing.T) {
 func TestStudioPageCanOpenProjectStudio(t *testing.T) {
 	t.Parallel()
 
-	got, err := buildDashboardURL("https://capydb.dev/", "project_999", "studio")
+	got, err := buildDashboardURL("https://capydb.dev/", "acme", "api-prod", "project_999", "studio")
 	if err != nil {
 		t.Fatalf("build dashboard url: %v", err)
 	}
-	if got != "https://capydb.dev/dashboard/projects/project_999/studio" {
+	if got != "https://capydb.dev/dashboard/acme/api-prod/studio" {
 		t.Fatalf("unexpected studio page URL: %s", got)
 	}
 }
@@ -803,7 +803,7 @@ func TestCreateErrorPayloadMapsBillingAndAuthFailures(t *testing.T) {
 	if payload["error"] != "billing_inactive" {
 		t.Fatalf("error = %q, want billing_inactive", payload["error"])
 	}
-	if payload["action"] != "open_url" || payload["url"] != "https://capydb.dev/dashboard/settings?tab=billing" {
+	if payload["action"] != "open_url" || payload["url"] != "https://capydb.dev/dashboard/settings/billing" {
 		t.Fatalf("payload = %v, want open_url action with billing url", payload)
 	}
 

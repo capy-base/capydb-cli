@@ -133,7 +133,7 @@ func TestSQLCommandRendersTable(t *testing.T) {
 						{"id": 2, "email": nil},
 					},
 					"row_count":   2,
-					"duration_ms": 4.2,
+					"duration_ms": 4,
 					"truncated":   false,
 				},
 			})
@@ -173,7 +173,7 @@ func TestSQLCommandRendersTable(t *testing.T) {
 		"id", "email",
 		"ada@example.com",
 		"NULL",
-		"(2 rows, 4.2ms)",
+		"(2 rows, 4ms)",
 	} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("sql output missing %q\n%s", expected, text)

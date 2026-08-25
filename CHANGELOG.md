@@ -1,0 +1,108 @@
+# Changelog
+
+All notable changes to the `capydb` CLI are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
+[SemVer](https://semver.org/).
+
+Releases are cut with GoReleaser from a git tag; entries under **Unreleased** ship with the next tag.
+
+## [Unreleased]
+
+### Added
+
+- Cloudflare integration support: `capydb integrations env --target wrangler` prints the
+  `wrangler.jsonc` Hyperdrive binding fragment for a linked project, alongside the existing Vercel
+  and Netlify payloads.
+- `capydb psql` resolves the CapyDB root certificate for `sslmode=verify-full` connection strings,
+  so `psql` no longer fails against a verified-TLS connection string.
+
+### Changed
+
+- The API types the CLI used to declare itself are now aliases of the shared `capydbclient` module,
+  the single Go mirror of the OpenAPI component schemas. The CLI keeps only three local shapes
+  (`Client`, `PreviewDetails`, `ProjectLogsQuery`); everything else comes from one definition shared
+  with the Terraform provider. Tracks `capydbclient` v1.6.0.
+- Go directive raised to 1.27.0.
+
+### Fixed
+
+- `capydb backups list` can now report backup verification (`verified_at`, `verification_error`) —
+  the CLI's local `Backup` type had been missing both fields.
+- `capydb alerts` and `capydb sql` rendered `observed_value`, `limit_value` and `duration_ms` as
+  decimals; the API sends integers. Values now render exactly as the API reports them.
+- `capydb import preflight` surfaces the source's event triggers, which the local preflight type had
+  been dropping.
+
+## [2026-08-18]
+
+### Fixed
+
+- `capydb psql` builds a connection URL that carries the SSL root certificate, fixing connections to
+  cells issued `sslmode=verify-full` strings.
+
+## [2026-08-12]
+
+### Added
+
+- `capydb doctor` config-lint rules for `uuidv7()` defaults and missing `NOT NULL` constraints.
+
+## [2026-08-11]
+
+### Changed
+
+- Tracks `capydbclient` v1.5.0 and `capyrls` v1.0.1.
+
+## [2026-08-05]
+
+### Added
+
+- `capydb advisor` — index suggestions derived from the project's real query predicates, costed as
+  hypothetical indexes so nothing is written to the database.
+- `capydb migrate rls` — converts Supabase row-level-security policies to vanilla Postgres, backed
+  by the `capyrls` engine, plus a matching `configlint` rule.
+
+## [2026-07-29]
+
+### Added
+
+- `capydb upgrade major` with confirm and rollback, and webhook test-delivery support.
+
+## [2026-07-24]
+
+### Added
+
+- `capydb doctor` and the `configlint` package: static inspection of a repo's database
+  configuration, including drizzle/prisma migration-state checks that catch the `db:push` then
+  `db:migrate` trap.
+- `capydb upgrade minor` and `capydb extensions update` for managing Postgres versions and extension
+  versions.
+
+## [2026-07-23]
+
+### Added
+
+- Env-shadowing detection across `.env*` files — the same key pointing at different databases is
+  reported by `migrate scan`, `link`, `create` and `doctor`.
+- `drizzle-kit` table filter that excludes `pg_stat_statements` from push/pull, preventing a
+  `DROP VIEW` against cells that still carry the views in `public`.
+
+## [2026-07-22]
+
+### Added
+
+- Detection and warnings for pooler startup parameters that the pooled `:6432` endpoint rejects.
+- Documented exit codes (0 success, 2 usage, 3 auth, 4 not found, 5 conflict, 6 timeout) and
+  `capydb migrate scan` for planning a move from another provider.
+
+## [2026-07-16]
+
+### Added
+
+- `capydb generate` (TypeScript, Zod, Drizzle types rendered server-side from the live schema),
+  `capydb schema dump|diff`, `capydb init drizzle`, and `capydb migrate codemod neon`.
+
+## [2026-06-03]
+
+### Added
+
+- First release: project linking, `env pull`, preview databases, imports, logs, and studio.

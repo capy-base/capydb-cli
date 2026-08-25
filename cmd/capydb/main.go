@@ -33,13 +33,11 @@ func exitCodeFor(err error) int {
 		return int(exitcode.Success)
 	}
 
-	var coded *exitcode.Error
-	if errors.As(err, &coded) {
+	if coded, ok := errors.AsType[*exitcode.Error](err); ok {
 		return int(coded.Code)
 	}
 
-	var apiErr *api.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*api.APIError](err); ok {
 		return int(exitcode.FromHTTPStatus(apiErr.StatusCode))
 	}
 

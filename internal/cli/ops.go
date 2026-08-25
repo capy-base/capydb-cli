@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -1368,6 +1369,8 @@ func (a *app) newStudioCommand() *cobra.Command {
 
 			var authConfig resolvedAuth
 			var projectID string
+			var projectSlug string
+			var workspaceSlug string
 			if strings.TrimSpace(projectRef) == "" {
 				linkConfig, linkErr := config.LoadProjectConfig(a.cwd)
 				if linkErr != nil {
@@ -1377,7 +1380,13 @@ func (a *app) newStudioCommand() *cobra.Command {
 					return linkErr
 				}
 				projectID = linkConfig.ProjectID
+				projectSlug = linkConfig.ProjectSlug
 				authConfig.APIURL = a.resolveAPIURL(linkConfig.APIURL)
+				// Best effort: the workspace slug completes the readable URL, but `capydb studio`
+				// must keep working from the link file alone when there are no credentials.
+				if client, _, clientErr := a.resolveClient(true); clientErr == nil {
+					workspaceSlug = lookupWorkspaceSlug(ctx, client)
+				}
 			} else {
 				client, resolved, err := a.resolveClient(true)
 				if err != nil {
@@ -1389,9 +1398,11 @@ func (a *app) newStudioCommand() *cobra.Command {
 					return err
 				}
 				projectID = project.ID
+				projectSlug = project.Slug
+				workspaceSlug = lookupWorkspaceSlug(ctx, client)
 			}
 
-			rawURL, err := buildDashboardURL(a.resolveAppURL(authConfig.APIURL), projectID, page)
+			rawURL, err := buildDashboardURL(a.resolveAppURL(authConfig.APIURL), workspaceSlug, projectSlug, projectID, page)
 			if err != nil {
 				return err
 			}
@@ -1559,13 +1570,34 @@ func (a *app) resolveAppURL(apiURL string) string {
 	return apiURL
 }
 
-func buildDashboardURL(appURL, projectID, page string) (string, error) {
+// lookupWorkspaceSlug returns the dashboard's workspace segment for the caller's
+// organization, or "" when it cannot be determined. The dashboard addresses a
+// workspace by its Clerk organization slug.
+func lookupWorkspaceSlug(ctx context.Context, client *api.Client) string {
+	viewer, err := client.GetViewer(ctx)
+	if err != nil || viewer.Organization == nil {
+		return ""
+	}
+	return strings.TrimSpace(viewer.Organization.ClerkOrganizationSlug)
+}
+
+// buildDashboardURL builds the readable dashboard URL
+// (/dashboard/<workspace>/<project>/<page>) whenever both slugs are known. The
+// id form is kept as the fallback: the dashboard still resolves it server-side
+// and forwards, so an unauthenticated or partially-linked CLI still opens the
+// right page.
+func buildDashboardURL(appURL, workspaceSlug, projectSlug, projectID, page string) (string, error) {
 	appURL = strings.TrimRight(strings.TrimSpace(appURL), "/")
 	if appURL == "" {
 		return "", fmt.Errorf("could not determine the dashboard URL; set CAPYDB_APP_URL")
 	}
 
+	workspaceSlug = strings.TrimSpace(workspaceSlug)
+	projectSlug = strings.TrimSpace(projectSlug)
 	basePath := "/dashboard/projects/" + strings.TrimSpace(projectID)
+	if workspaceSlug != "" && projectSlug != "" {
+		basePath = "/dashboard/" + url.PathEscape(workspaceSlug) + "/" + url.PathEscape(projectSlug)
+	}
 	switch strings.ToLower(strings.TrimSpace(page)) {
 	case "", "overview":
 		return appURL + basePath, nil

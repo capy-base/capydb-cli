@@ -252,7 +252,7 @@ func writeSQLResultTable(out io.Writer, result api.SQLResult) {
 		_ = writer.Flush()
 	}
 
-	_, _ = fmt.Fprintf(out, "(%d rows, %.1fms)\n", result.RowCount, result.DurationMs)
+	_, _ = fmt.Fprintf(out, "(%d rows, %dms)\n", result.RowCount, result.DurationMs)
 	if result.Truncated {
 		_, _ = fmt.Fprintln(out, "note: result truncated; raise --max-rows to fetch more")
 	}
@@ -348,7 +348,7 @@ func writeObservabilityReport(out io.Writer, observability api.ProjectObservabil
 		}
 		_, _ = fmt.Fprintf(
 			writer,
-			"%d\t%s\t%s\t%.0f\t%s\t%s\n",
+			"%d\t%s\t%s\t%d\t%s\t%s\n",
 			active.PID,
 			firstNonEmpty(active.Username, "-"),
 			firstNonEmpty(active.State, "-"),

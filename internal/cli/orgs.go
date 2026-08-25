@@ -149,7 +149,7 @@ func (a *app) resolveOrgID(ctx context.Context, client *api.Client, authConfig r
 		return trimmed, nil
 	}
 
-	viewer, err := client.GetViewerResponse(ctx)
+	viewer, err := client.GetViewer(ctx)
 	if err != nil {
 		return "", fmt.Errorf("load viewer: %w", err)
 	}

@@ -123,6 +123,7 @@ Exit codes:
 	root.AddCommand(application.newJobsCommand())
 	root.AddCommand(application.newStudioCommand())
 	root.AddCommand(application.newIntegrationsCommand())
+	root.AddCommand(application.newCloudflareCommand())
 	root.AddCommand(application.newConnectionStringCommand())
 	root.AddCommand(application.newCredentialsCommand())
 	root.AddCommand(application.newPsqlCommand())
@@ -210,7 +211,7 @@ func (a *app) runLogin(cmd *cobra.Command, options loginOptions) error {
 		if err != nil {
 			return err
 		}
-		viewer, err := client.GetViewerResponse(ctx)
+		viewer, err := client.GetViewer(ctx)
 		if err != nil {
 			return fmt.Errorf("validate api key: %w", err)
 		}
@@ -378,7 +379,7 @@ func (a *app) runWhoami(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	viewer, err := client.GetViewerResponse(ctx)
+	viewer, err := client.GetViewer(ctx)
 	if err != nil {
 		return fmt.Errorf("load viewer: %w", err)
 	}
@@ -1139,8 +1140,7 @@ func createErrorPayload(err error) map[string]string {
 		"message": err.Error(),
 	}
 
-	var billingErr *billingInactiveError
-	if errors.As(err, &billingErr) {
+	if billingErr, ok := errors.AsType[*billingInactiveError](err); ok {
 		payload["error"] = "billing_inactive"
 		payload["action"] = "open_url"
 		payload["url"] = billingErr.url
@@ -1195,7 +1195,7 @@ func ensureViewerCanProvision(viewer api.Viewer, appURL string) error {
 		return nil
 	}
 
-	billingURL := strings.TrimRight(firstNonEmpty(appURL, config.DefaultAppURL("")), "/") + "/dashboard/settings?tab=billing"
+	billingURL := strings.TrimRight(firstNonEmpty(appURL, config.DefaultAppURL("")), "/") + "/dashboard/settings/billing"
 	return &billingInactiveError{
 		message: fmt.Sprintf(
 			"organization billing is %s on plan %s; pick a plan (1 month free) at %s before creating a project",
