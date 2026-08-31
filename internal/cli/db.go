@@ -15,41 +15,56 @@ import (
 )
 
 // resolveConnectionURL resolves the direct or pooled connection URL for the
-// linked project, an explicit --project, or an explicit --preview id.
-func (a *app) resolveConnectionURL(cmd *cobra.Command, pooled bool, previewID, projectRef string) (string, error) {
+// linked project, an explicit --project, or an explicit --preview id. The
+// second return value is the project's runtime status ("active", "paused",
+// "resuming"; empty for previews and while provisioning) so callers can
+// explain a scale-to-zero wake - the project is already fetched here, so this
+// costs no extra API call.
+func (a *app) resolveConnectionURL(cmd *cobra.Command, pooled bool, previewID, projectRef string) (string, string, error) {
 	ctx := cmd.Context()
 	client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	var connections api.ConnectionInfo
+	var runtimeStatus string
 	if trimmed := strings.TrimSpace(previewID); trimmed != "" {
 		connections, err = client.GetPreviewConnection(ctx, trimmed)
 		if err != nil {
-			return "", fmt.Errorf("fetch preview connections: %w", err)
+			return "", "", fmt.Errorf("fetch preview connections: %w", err)
 		}
 	} else {
 		project, err := a.resolveProject(ctx, client, projectRef)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
+		runtimeStatus = project.RuntimeStatus
 		connections, err = client.GetProjectConnection(ctx, project.ID)
 		if err != nil {
-			return "", fmt.Errorf("fetch project connections: %w", err)
+			return "", "", fmt.Errorf("fetch project connections: %w", err)
 		}
 	}
 
 	if pooled {
 		if strings.TrimSpace(connections.PooledURL) == "" {
-			return "", fmt.Errorf("no pooled connection URL available")
+			return "", "", fmt.Errorf("no pooled connection URL available")
 		}
-		return connections.PooledURL, nil
+		return connections.PooledURL, runtimeStatus, nil
 	}
 	if strings.TrimSpace(connections.DirectURL) == "" {
-		return "", fmt.Errorf("no direct connection URL available")
+		return "", "", fmt.Errorf("no direct connection URL available")
 	}
-	return connections.DirectURL, nil
+	return connections.DirectURL, runtimeStatus, nil
+}
+
+// resumingNotice returns the one-line stderr notice shown before connecting to
+// a paused project database, or "" when no notice is needed.
+func resumingNotice(runtimeStatus string) string {
+	if runtimeStatus == "paused" {
+		return "Resuming your database (usually under a second)..."
+	}
+	return ""
 }
 
 // psqlConnectionURL makes an issued connection URL usable by psql out of the box.
@@ -84,7 +99,7 @@ func (a *app) newConnectionStringCommand() *cobra.Command {
 		Long:  "Prints only the connection URL to stdout so it can be used in scripts; everything else goes to stderr. Defaults to the direct URL.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			connectionURL, err := a.resolveConnectionURL(cmd, pooled, previewID, projectRef)
+			connectionURL, _, err := a.resolveConnectionURL(cmd, pooled, previewID, projectRef)
 			if err != nil {
 				return err
 			}
@@ -115,9 +130,12 @@ func (a *app) newPsqlCommand() *cobra.Command {
 		Short: "Open psql connected to a project or preview database",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			connectionURL, err := a.resolveConnectionURL(cmd, pooled, previewID, projectRef)
+			connectionURL, runtimeStatus, err := a.resolveConnectionURL(cmd, pooled, previewID, projectRef)
 			if err != nil {
 				return err
+			}
+			if notice := resumingNotice(runtimeStatus); notice != "" {
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), notice)
 			}
 			connectionURL = psqlConnectionURL(connectionURL)
 
@@ -146,6 +164,7 @@ func (a *app) newPsqlCommand() *cobra.Command {
 }
 
 func (a *app) newSQLCommand() *cobra.Command {
+	var allowUnqualifiedWrites bool
 	var asJSON bool
 	var maxRows int
 	var projectRef string
@@ -170,7 +189,7 @@ func (a *app) newSQLCommand() *cobra.Command {
 				return err
 			}
 
-			result, err := client.RunSQL(ctx, project.ID, query, maxRows)
+			result, err := client.RunSQL(ctx, project.ID, query, maxRows, allowUnqualifiedWrites)
 			if err != nil {
 				return fmt.Errorf("run sql: %w", err)
 			}
@@ -188,6 +207,11 @@ func (a *app) newSQLCommand() *cobra.Command {
 
 	command.Flags().StringVar(&projectRef, "project", "", "Project id, slug, or name")
 	command.Flags().IntVar(&maxRows, "max-rows", 0, "Maximum number of rows to return (server default when omitted)")
+	// Unlike the dashboard's SQL console, the CLI is guarded by default: it is
+	// as likely to be running inside a script as under a person, and a script
+	// is exactly the caller that should have to say it meant to empty a table.
+	command.Flags().BoolVar(&allowUnqualifiedWrites, "allow-unqualified-writes", false,
+		"Permit an UPDATE or DELETE with no WHERE clause, or a TRUNCATE (refused by default)")
 	command.Flags().BoolVar(&asJSON, "json", false, "Print the raw JSON result (alias for --output json)")
 	return command
 }

@@ -51,6 +51,75 @@ func TestResolveRestoreTargetKind(t *testing.T) {
 	}
 }
 
+func TestRestoreSourceDescription(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		backupKey      string
+		restoreTime    string
+		restorePointID string
+		want           string
+	}{
+		{name: "backup key", backupKey: "base_20260826", want: "backup base_20260826"},
+		{name: "restore time", restoreTime: "2026-08-26T10:00:00Z", want: "the state at 2026-08-26T10:00:00Z"},
+		{name: "restore point", restorePointID: "rp_1", want: "restore point rp_1"},
+		{name: "fallback", want: "the requested restore source"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := restoreSourceDescription(tt.backupKey, tt.restoreTime, tt.restorePointID); got != tt.want {
+				t.Fatalf("restoreSourceDescription() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRestoreOutcome(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		targetKind string
+		previewID  string
+		want       string
+	}{
+		{
+			name:       "project overwrite",
+			targetKind: "project",
+			want: "Restore complete: the live database for project test-app now matches backup base_1.\n" +
+				"Connections resume automatically. Verify with `capydb sql \"select 1\"`.\n",
+		},
+		{
+			name:       "new preview with id",
+			targetKind: "new_preview",
+			previewID:  "prv_9",
+			want: "Restore complete: preview prv_9 now holds the restored data.\n" +
+				"Get its connection string with `capydb connection-string --preview prv_9`.\n",
+		},
+		{
+			name:       "existing preview with id",
+			targetKind: "preview",
+			previewID:  "prv_2",
+			want: "Restore complete: preview prv_2 now holds the restored data.\n" +
+				"Get its connection string with `capydb connection-string --preview prv_2`.\n",
+		},
+		{
+			name:       "preview without id",
+			targetKind: "new_preview",
+			want: "Restore complete: the preview database now holds the restored data.\n" +
+				"Find it with `capydb preview list`.\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := restoreOutcome("test-app", tt.targetKind, "backup base_1", tt.previewID); got != tt.want {
+				t.Fatalf("restoreOutcome() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPreviewExtendCallsEndpoint(t *testing.T) {
 	t.Setenv("CI", "true")
 

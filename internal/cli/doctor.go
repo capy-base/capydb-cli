@@ -194,7 +194,9 @@ func (a *app) runDoctor(cmd *cobra.Command, args []string) error {
 			break
 		}
 		query := configlint.MigrationStateQuery(local.Tool)
-		result, sqlErr := client.RunSQL(ctx, linkConfig.ProjectID, query, 1)
+		// Read-only introspection, so it is never a candidate for the
+		// unqualified-write opt-out.
+		result, sqlErr := client.RunSQL(ctx, linkConfig.ProjectID, query, 1, false)
 		switch {
 		case sqlErr != nil:
 			// A paused cell, a permissions quirk, or a missing migrations table

@@ -10,6 +10,26 @@ Releases are cut with GoReleaser from a git tag; entries under **Unreleased** sh
 
 ### Added
 
+- `capydb db sql --allow-unqualified-writes`. The control plane now refuses an `UPDATE` or
+  `DELETE` with no `WHERE` and any `TRUNCATE`; the flag opts out. Guarded by default here rather
+  than opted out like the dashboard console, because the CLI is as likely to be inside a script as
+  under a person, and a script is exactly the caller that should have to say it meant it.
+
+- `capydb export`: queue a logical export (`pg_dump` custom-format archive) of the project
+  database, wait for the job, and download the artifact with TTY-aware progress - plus
+  `capydb export list` and `capydb export download --export <id>` to re-download within the 7-day
+  window. Downloads refuse to overwrite an existing file. (Needs capydbclient v1.7.0.)
+- `capydb logs --hours` now accepts up to 720 (30 days); the control plane serves windows older
+  than 7 days from the platform log archive where it is configured, and rejects windows beyond the
+  deployment's cap.
+- `capydb psql` prints a one-line notice on stderr (`Resuming your database (usually under a
+  second)...`) when connecting to a paused project database, so the scale-to-zero wake pause is
+  explained instead of looking like a hang.
+- `capydb restore --wait` ends a successful restore with a plain-language outcome: what the target
+  (live database or preview) now contains and the command to verify it or fetch its connection
+  string, instead of only the bare job block.
+- `capydb import --wait` ends a successful import by stating that the project's live database now
+  contains the imported data, with the verify command.
 - Cloudflare integration support: `capydb integrations env --target wrangler` prints the
   `wrangler.jsonc` Hyperdrive binding fragment for a linked project, alongside the existing Vercel
   and Netlify payloads.
@@ -26,6 +46,9 @@ Releases are cut with GoReleaser from a git tag; entries under **Unreleased** sh
 
 ### Fixed
 
+- The dump-upload progress line (`capydb import --file`) is now TTY-aware: piped/CI runs get plain
+  progress lines at most every 5 seconds and a final `Upload complete` line, instead of one
+  carriage-return-garbled line in the log.
 - `capydb backups list` can now report backup verification (`verified_at`, `verification_error`) —
   the CLI's local `Backup` type had been missing both fields.
 - `capydb alerts` and `capydb sql` rendered `observed_value`, `limit_value` and `duration_ms` as

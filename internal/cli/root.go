@@ -116,6 +116,7 @@ Exit codes:
 	root.AddCommand(application.newSchemaCommand())
 	root.AddCommand(application.newPreviewCommand())
 	root.AddCommand(application.newBackupsCommand())
+	root.AddCommand(application.newExportCommand())
 	root.AddCommand(application.newImportCommand())
 	root.AddCommand(application.newMigrateCommand())
 	root.AddCommand(application.newRestoreCommand())

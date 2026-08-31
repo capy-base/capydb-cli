@@ -34,8 +34,8 @@ func (a *app) newLogsCommand() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			if hours < 1 || hours > 168 {
-				return usageErrorf("--hours must be between 1 and 168")
+			if hours < 1 || hours > 720 {
+				return usageErrorf("--hours must be between 1 and 720")
 			}
 			if limit < 0 || limit > 500 {
 				return usageErrorf("--limit must be between 0 and 500")
@@ -81,7 +81,7 @@ func (a *app) newLogsCommand() *cobra.Command {
 	}
 
 	command.Flags().StringVar(&projectRef, "project", "", "Project id, slug, or name")
-	command.Flags().IntVar(&hours, "hours", 1, "Trailing window in hours (1-168)")
+	command.Flags().IntVar(&hours, "hours", 1, "Trailing window in hours (1-720; beyond 168 needs the platform log archive)")
 	command.Flags().IntVar(&limit, "limit", 0, "Maximum entries per fetch (server default when omitted, max 500)")
 	command.Flags().StringVar(&severity, "severity", "", "Comma-separated severity filter (debug, log, info, notice, warning, error, fatal, panic, detail)")
 	command.Flags().BoolVarP(&follow, "follow", "f", false, "Keep the stream open and print new entries as they arrive")

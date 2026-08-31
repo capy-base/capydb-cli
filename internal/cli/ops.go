@@ -339,6 +339,235 @@ func (a *app) newBackupsCommand() *cobra.Command {
 	return command
 }
 
+func (a *app) newExportCommand() *cobra.Command {
+	var projectRef string
+	var output string
+	var noDownload bool
+	var waitTimeout time.Duration
+
+	command := &cobra.Command{
+		Use:   "export",
+		Short: "Export the project database to a downloadable dump",
+		Long: "Queues a logical export (a pg_dump custom-format archive), waits for it to complete, " +
+			"and downloads the artifact. Exports stay downloadable for 7 days; re-download one within " +
+			"that window with `capydb export download`.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+			if err != nil {
+				return err
+			}
+
+			project, err := a.resolveProject(ctx, client, projectRef)
+			if err != nil {
+				return err
+			}
+
+			exportID, job, err := client.CreateExport(ctx, project.ID)
+			if err != nil {
+				return fmt.Errorf("create export: %w", err)
+			}
+			if !a.jsonOutput() {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued export job %s for project %s\n", job.ID, project.Name)
+			}
+
+			job, err = waitForJob(ctx, cmd.ErrOrStderr(), client, job.ID, waitTimeout)
+			if err != nil {
+				return err
+			}
+			if err := ensureCompletedJob(job, "export"); err != nil {
+				return err
+			}
+
+			if noDownload {
+				if a.jsonOutput() {
+					return printJSON(cmd.OutOrStdout(), map[string]any{"export_id": exportID, "job": job})
+				}
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Export %s is ready; download it with: capydb export download --export %s\n", exportID, exportID)
+				return nil
+			}
+
+			dest := output
+			if dest == "" {
+				dest = exportFileName(project.Name)
+			}
+			if err := downloadExport(ctx, cmd.ErrOrStderr(), client, project.ID, exportID, dest); err != nil {
+				return err
+			}
+			if a.jsonOutput() {
+				return printJSON(cmd.OutOrStdout(), map[string]any{"export_id": exportID, "file": dest})
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Downloaded export %s to %s\n", exportID, dest)
+			return nil
+		},
+	}
+	command.Flags().StringVar(&projectRef, "project", "", "Project id, slug, or name")
+	command.Flags().StringVar(&output, "output", "", "Destination file (default <project>-<timestamp>.dump)")
+	command.Flags().BoolVar(&noDownload, "no-download", false, "Queue the export and wait, but skip the download")
+	command.Flags().DurationVar(&waitTimeout, "wait-timeout", defaultWaitTimeout, "Maximum time to wait for the export job")
+
+	var listProjectRef string
+	listCommand := &cobra.Command{
+		Use:   "list",
+		Short: "List exports for a project",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+			if err != nil {
+				return err
+			}
+
+			project, err := a.resolveProject(ctx, client, listProjectRef)
+			if err != nil {
+				return err
+			}
+
+			exports, err := client.ListExports(ctx, project.ID)
+			if err != nil {
+				return fmt.Errorf("list exports: %w", err)
+			}
+			if a.jsonOutput() {
+				return printJSON(cmd.OutOrStdout(), map[string]any{"exports": jsonList(exports)})
+			}
+			if len(exports) == 0 {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No exports for project %s\n", project.Name)
+				return nil
+			}
+
+			writeExportTable(cmd.OutOrStdout(), exports)
+			return nil
+		},
+	}
+	listCommand.Flags().StringVar(&listProjectRef, "project", "", "Project id, slug, or name")
+
+	var downloadProjectRef string
+	var downloadExportID string
+	var downloadOutput string
+	downloadCommand := &cobra.Command{
+		Use:   "download",
+		Short: "Download a completed export",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			if strings.TrimSpace(downloadExportID) == "" {
+				return errors.New("specify --export <id> (see capydb export list)")
+			}
+			client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+			if err != nil {
+				return err
+			}
+
+			project, err := a.resolveProject(ctx, client, downloadProjectRef)
+			if err != nil {
+				return err
+			}
+
+			dest := downloadOutput
+			if dest == "" {
+				dest = exportFileName(project.Name)
+			}
+			if err := downloadExport(ctx, cmd.ErrOrStderr(), client, project.ID, downloadExportID, dest); err != nil {
+				return err
+			}
+			if a.jsonOutput() {
+				return printJSON(cmd.OutOrStdout(), map[string]any{"export_id": downloadExportID, "file": dest})
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Downloaded export %s to %s\n", downloadExportID, dest)
+			return nil
+		},
+	}
+	downloadCommand.Flags().StringVar(&downloadProjectRef, "project", "", "Project id, slug, or name")
+	downloadCommand.Flags().StringVar(&downloadExportID, "export", "", "Export id to download")
+	downloadCommand.Flags().StringVar(&downloadOutput, "output", "", "Destination file (default <project>-<timestamp>.dump)")
+
+	command.AddCommand(listCommand)
+	command.AddCommand(downloadCommand)
+	return command
+}
+
+// downloadExport presigns a download URL for the export and streams it to
+// destPath with the same TTY-aware progress rendering as dump uploads.
+func downloadExport(ctx context.Context, stderr io.Writer, client *api.Client, projectID, exportID, destPath string) error {
+	download, err := client.GetExportDownload(ctx, projectID, exportID)
+	if err != nil {
+		return fmt.Errorf("request download URL: %w", err)
+	}
+
+	isTTY := writerIsTerminal(stderr)
+	renderInterval := 200 * time.Millisecond
+	if !isTTY {
+		renderInterval = 5 * time.Second
+	}
+	lastRender := time.Time{}
+	progress := func(received, total int64) {
+		if time.Since(lastRender) < renderInterval && (total == 0 || received < total) {
+			return
+		}
+		if !isTTY && total > 0 && received >= total {
+			return
+		}
+		lastRender = time.Now()
+		line := fmt.Sprintf("Downloading %s... %s", destPath, formatBytes(received))
+		if total > 0 {
+			line += fmt.Sprintf(" / %s (%d%%)", formatBytes(total), received*100/total)
+		}
+		if isTTY {
+			_, _ = fmt.Fprintf(stderr, "\r%s", line)
+		} else {
+			_, _ = fmt.Fprintln(stderr, line)
+		}
+	}
+
+	if err := client.DownloadExport(ctx, download.DownloadURL, destPath, progress); err != nil {
+		if isTTY {
+			_, _ = fmt.Fprintln(stderr)
+		}
+		return err
+	}
+	if isTTY {
+		_, _ = fmt.Fprintln(stderr)
+	} else {
+		_, _ = fmt.Fprintf(stderr, "Download complete: %s\n", destPath)
+	}
+	return nil
+}
+
+// exportFileName derives a safe default filename for a downloaded export.
+func exportFileName(projectName string) string {
+	sanitized := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		case r == ' ', r == '_':
+			return '-'
+		default:
+			return -1
+		}
+	}, projectName)
+	if sanitized == "" {
+		sanitized = "capydb"
+	}
+	return fmt.Sprintf("%s-%s.dump", sanitized, time.Now().UTC().Format("20060102T150405Z"))
+}
+
+func writeExportTable(out io.Writer, exports []api.ProjectExport) {
+	writer := tabwriter.NewWriter(out, 0, 8, 2, ' ', 0)
+	_, _ = fmt.Fprintln(writer, "ID\tSTATE\tSIZE\tCREATED_AT\tEXPIRES_AT")
+	for _, export := range exports {
+		_, _ = fmt.Fprintf(
+			writer,
+			"%s\t%s\t%s\t%s\t%s\n",
+			export.ID,
+			export.State,
+			formatBytes(export.SizeBytes),
+			formatTime(export.CreatedAt),
+			formatTime(export.ExpiresAt),
+		)
+	}
+	_ = writer.Flush()
+}
+
 func (a *app) newBackupScheduleCommand() *cobra.Command {
 	command := &cobra.Command{
 		Use:   "schedule",
@@ -612,7 +841,15 @@ func (a *app) newImportCommand() *cobra.Command {
 			if !a.jsonOutput() {
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued import job %s for project %s\n", job.ID, project.Name)
 			}
-			return a.maybeWaitForJob(cmd, client, job, wait, waitTimeout, "import")
+			// A nil error with --wait set means ensureCompletedJob passed
+			// (freshly queued jobs are always pending, so the wait ran).
+			if err := a.maybeWaitForJob(cmd, client, job, wait, waitTimeout, "import"); err != nil {
+				return err
+			}
+			if wait && job.ID != "" && !a.jsonOutput() {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Import complete: the live database for project %s now contains the imported data. Verify with `capydb sql \"select 1\"`.\n", project.Name)
+			}
+			return nil
 		},
 	}
 
@@ -797,10 +1034,21 @@ func uploadImportDump(ctx context.Context, stderr io.Writer, client *api.Client,
 		return "", fmt.Errorf("request upload URL: %w", err)
 	}
 
+	// On a TTY the progress line rewrites itself in place; piped/CI output
+	// gets plain lines at most every 5 seconds so logs stay readable.
+	isTTY := writerIsTerminal(stderr)
+	renderInterval := 200 * time.Millisecond
+	if !isTTY {
+		renderInterval = 5 * time.Second
+	}
 	lastRender := time.Time{}
 	progress := func(sent, total int64) {
-		// Throttle redraws; always render the final 100% line.
-		if time.Since(lastRender) < 200*time.Millisecond && sent < total {
+		// Throttle redraws; always render the final 100% line on a TTY. The
+		// non-TTY path ends with the "Upload complete" line instead.
+		if time.Since(lastRender) < renderInterval && sent < total {
+			return
+		}
+		if !isTTY && sent >= total {
 			return
 		}
 		lastRender = time.Now()
@@ -808,14 +1056,25 @@ func uploadImportDump(ctx context.Context, stderr io.Writer, client *api.Client,
 		if total > 0 {
 			percent = sent * 100 / total
 		}
-		_, _ = fmt.Fprintf(stderr, "\rUploading %s... %s / %s (%d%%)", dumpFile, formatBytes(sent), formatBytes(total), percent)
+		line := fmt.Sprintf("Uploading %s... %s / %s (%d%%)", dumpFile, formatBytes(sent), formatBytes(total), percent)
+		if isTTY {
+			_, _ = fmt.Fprintf(stderr, "\r%s", line)
+		} else {
+			_, _ = fmt.Fprintln(stderr, line)
+		}
 	}
 
 	if err := client.UploadDump(ctx, upload.UploadURL, dumpFile, progress); err != nil {
-		_, _ = fmt.Fprintln(stderr)
+		if isTTY {
+			_, _ = fmt.Fprintln(stderr)
+		}
 		return "", fmt.Errorf("upload dump: %w", err)
 	}
-	_, _ = fmt.Fprintln(stderr)
+	if isTTY {
+		_, _ = fmt.Fprintln(stderr)
+	} else {
+		_, _ = fmt.Fprintf(stderr, "Upload complete: %s\n", dumpFile)
+	}
 	return upload.ObjectKey, nil
 }
 
@@ -1010,7 +1269,16 @@ func (a *app) newRestoreCommand() *cobra.Command {
 			if !a.jsonOutput() {
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Queued restore job %s for project %s\n", job.ID, project.Name)
 			}
-			return a.maybeWaitForJob(cmd, client, job, wait, waitTimeout, "restore")
+			// A nil error with --wait set means ensureCompletedJob passed
+			// (freshly queued jobs are always pending, so the wait ran).
+			if err := a.maybeWaitForJob(cmd, client, job, wait, waitTimeout, "restore"); err != nil {
+				return err
+			}
+			if wait && job.ID != "" && !a.jsonOutput() {
+				source := restoreSourceDescription(trimmedBackupKey, trimmedRestoreTime, trimmedRestorePoint)
+				_, _ = fmt.Fprint(cmd.OutOrStdout(), restoreOutcome(project.Name, resolvedKind, source, firstNonEmpty(job.PreviewDatabaseID, request.PreviewID)))
+			}
+			return nil
 		},
 	}
 
@@ -1054,6 +1322,37 @@ func resolveRestoreTargetKind(targetKind, previewRef, previewName string) (strin
 	default:
 		return "", usageErrorf("--target-kind must be one of project, preview, or new_preview")
 	}
+}
+
+// restoreSourceDescription names what was restored from, mirroring whichever
+// of the mutually exclusive source flags the operator passed.
+func restoreSourceDescription(backupKey, restoreTime, restorePointID string) string {
+	switch {
+	case backupKey != "":
+		return "backup " + backupKey
+	case restoreTime != "":
+		return "the state at " + restoreTime
+	case restorePointID != "":
+		return "restore point " + restorePointID
+	default:
+		return "the requested restore source"
+	}
+}
+
+// restoreOutcome states what is now true after a successful restore, per
+// target kind, ending with the command that reaches the restored data.
+func restoreOutcome(projectName, targetKind, source, previewID string) string {
+	if targetKind == "project" {
+		return fmt.Sprintf("Restore complete: the live database for project %s now matches %s.\n", projectName, source) +
+			"Connections resume automatically. Verify with `capydb sql \"select 1\"`.\n"
+	}
+	// preview / new_preview targets leave the live database untouched.
+	if previewID != "" {
+		return fmt.Sprintf("Restore complete: preview %s now holds the restored data.\n", previewID) +
+			fmt.Sprintf("Get its connection string with `capydb connection-string --preview %s`.\n", previewID)
+	}
+	return "Restore complete: the preview database now holds the restored data.\n" +
+		"Find it with `capydb preview list`.\n"
 }
 
 // confirmProjectRestoreOverwrite guards the destructive project restore path. The

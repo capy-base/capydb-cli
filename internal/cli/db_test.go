@@ -106,6 +106,28 @@ func TestConnectionStringPrintsOnlyURL(t *testing.T) {
 	}
 }
 
+// The resuming notice fires only for a paused project: previews and
+// provisioning projects report no runtime status, and active/resuming
+// databases need no explanation.
+func TestResumingNotice(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		runtimeStatus string
+		want          string
+	}{
+		{runtimeStatus: "paused", want: "Resuming your database (usually under a second)..."},
+		{runtimeStatus: "active", want: ""},
+		{runtimeStatus: "resuming", want: ""},
+		{runtimeStatus: "", want: ""},
+	}
+	for _, tt := range tests {
+		if got := resumingNotice(tt.runtimeStatus); got != tt.want {
+			t.Errorf("resumingNotice(%q) = %q, want %q", tt.runtimeStatus, got, tt.want)
+		}
+	}
+}
+
 func TestSQLCommandRendersTable(t *testing.T) {
 	t.Setenv("CI", "true")
 

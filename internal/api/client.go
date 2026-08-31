@@ -46,6 +46,7 @@ type (
 	CreateImportRequest                = capydbclient.CreateImportRequest
 	CreateRestorePointRequest          = capydbclient.CreateRestorePointRequest
 	CreateRestoreRequest               = capydbclient.CreateRestoreRequest
+	ExportDownload                     = capydbclient.ExportDownload
 	ImportPreflight                    = capydbclient.ImportPreflightResult
 	ImportPreflightCheck               = capydbclient.ImportPreflightCheck
 	ImportPreflightExtension           = capydbclient.SourceExtension
@@ -57,6 +58,7 @@ type (
 	Preview                            = capydbclient.PreviewDatabase
 	ProjectAlert                       = capydbclient.ProjectAlert
 	ProjectAuditEvent                  = capydbclient.ProjectAuditEvent
+	ProjectExport                      = capydbclient.ProjectExport
 	ProjectExtension                   = capydbclient.ProjectExtensionStatus
 	ProjectIntegration                 = capydbclient.ProjectIntegration
 	ProjectLogEntry                    = capydbclient.ProjectLogEntry
@@ -590,12 +592,20 @@ func (c *Client) GetProjectObservability(ctx context.Context, projectID string) 
 
 // RunSQL executes a read-mostly SQL query against the project database via the
 // control plane. maxRows of 0 leaves the server default in place.
-func (c *Client) RunSQL(ctx context.Context, projectID, query string, maxRows int) (SQLResult, error) {
+//
+// allowUnqualifiedWrites opts out of the control plane's destructive-statement
+// guard, which otherwise refuses an UPDATE or DELETE with no top-level WHERE
+// and any TRUNCATE. It is sent only when true so an older control plane (which
+// does not know the field) keeps behaving as it does today.
+func (c *Client) RunSQL(ctx context.Context, projectID, query string, maxRows int, allowUnqualifiedWrites bool) (SQLResult, error) {
 	payload := map[string]any{
 		"query": query,
 	}
 	if maxRows > 0 {
 		payload["max_rows"] = maxRows
+	}
+	if allowUnqualifiedWrites {
+		payload["allow_unqualified_writes"] = true
 	}
 
 	var response struct {
@@ -629,6 +639,89 @@ func (c *Client) ListBackups(ctx context.Context, projectID string) ([]Backup, e
 		return nil, err
 	}
 	return response.Backups, nil
+}
+
+func (c *Client) CreateExport(ctx context.Context, projectID string) (string, Job, error) {
+	var response struct {
+		ExportID string `json:"export_id"`
+		Job      Job    `json:"job"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/exports", nil, &response); err != nil {
+		return "", Job{}, err
+	}
+	return response.ExportID, response.Job, nil
+}
+
+func (c *Client) ListExports(ctx context.Context, projectID string) ([]ProjectExport, error) {
+	var response struct {
+		Exports []ProjectExport `json:"exports"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/projects/"+projectID+"/exports", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Exports, nil
+}
+
+func (c *Client) GetExportDownload(ctx context.Context, projectID, exportID string) (ExportDownload, error) {
+	var response struct {
+		Download ExportDownload `json:"download"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/projects/"+projectID+"/exports/"+exportID+"/download", nil, &response); err != nil {
+		return ExportDownload{}, err
+	}
+	return response.Download, nil
+}
+
+// DownloadExport streams a presigned GET URL to a local file. The presigned
+// URL embeds its own authorization, so no API key header is sent. progress,
+// when non-nil, is invoked as bytes arrive (received, total; total is 0 when
+// the server sends no Content-Length). Refuses to overwrite an existing file.
+// Downloads share the upload timeout knob (default 30m, CAPYDB_HTTP_TIMEOUT
+// overrides it), applied via the context.
+func (c *Client) DownloadExport(ctx context.Context, downloadURL, destPath string, progress func(received, total int64)) error {
+	timeout, err := resolveUploadTimeout()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	file, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create export file: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return fmt.Errorf("build download request: %w", err)
+	}
+	request.Header.Set("User-Agent", c.doer.UserAgent)
+
+	downloadClient := &http.Client{}
+	response, err := downloadClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("download export: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		detail := strings.TrimSpace(string(raw))
+		if detail != "" {
+			return fmt.Errorf("download export: storage returned status %d: %s", response.StatusCode, detail)
+		}
+		return fmt.Errorf("download export: storage returned status %d", response.StatusCode)
+	}
+
+	body := io.Reader(response.Body)
+	if progress != nil {
+		body = &progressReader{reader: response.Body, total: max(response.ContentLength, 0), progress: progress}
+	}
+	if _, err := io.Copy(file, body); err != nil {
+		return fmt.Errorf("write export file: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) ListScheduledBackups(ctx context.Context, projectID string) ([]ScheduledBackup, error) {
