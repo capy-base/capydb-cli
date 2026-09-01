@@ -1,9 +1,9 @@
-module github.com/capy-base/capydb/cli
+module github.com/capy-base/capydb-cli
 
 go 1.27.0
 
 require (
-	github.com/capy-base/capydbclient v1.7.0
+	github.com/capy-base/capydbclient v1.8.0
 	github.com/capy-base/capyrls v1.0.1
 	github.com/spf13/cobra v1.10.2
 )

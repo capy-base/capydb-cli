@@ -17,8 +17,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/capy-base/capydb/cli/internal/api"
-	"github.com/capy-base/capydb/cli/internal/config"
+	"github.com/capy-base/capydb-cli/internal/api"
+	"github.com/capy-base/capydb-cli/internal/config"
 )
 
 func (a *app) newPreviewCommand() *cobra.Command {

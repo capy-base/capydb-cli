@@ -142,7 +142,7 @@ release:
     Install with:
 
     ```bash
-    go install github.com/capy-base/capydb/cli/cmd/capydb@{{ .Tag }}
+    go install github.com/capy-base/capydb-cli/cmd/capydb@{{ .Tag }}
     ```
   footer: |
     Download the archive for your platform from the assets below.

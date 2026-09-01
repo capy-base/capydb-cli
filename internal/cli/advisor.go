@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/capy-base/capydb/cli/internal/api"
+	"github.com/capy-base/capydb-cli/internal/api"
 )
 
 // newAdvisorCommand groups the read-only performance advisors.

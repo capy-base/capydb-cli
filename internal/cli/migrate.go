@@ -11,7 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/capy-base/capydb/cli/internal/scan"
+	"github.com/capy-base/capydb-cli/internal/scan"
 )
 
 // newMigrateCommand groups the provider-migration tooling: `scan` (read-only

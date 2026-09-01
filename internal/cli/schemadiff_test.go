@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/capy-base/capydb/cli/internal/api"
+	"github.com/capy-base/capydb-cli/internal/api"
 )
 
 func testSchema() api.DatabaseSchema {

@@ -20,14 +20,14 @@ curl -fsSL https://raw.githubusercontent.com/capy-base/capydb-cli/main/scripts/i
 With `go install`:
 
 ```bash
-go install github.com/capy-base/capydb/cli/cmd/capydb@latest
+go install github.com/capy-base/capydb-cli/cmd/capydb@latest
 ```
 
 From source:
 
 ```bash
-git clone https://github.com/capy-base/cli
-cd cli
+git clone https://github.com/capy-base/capydb-cli
+cd capydb-cli
 make build
 ```
 

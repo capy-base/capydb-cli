@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/capy-base/capydb/cli/internal/config"
-	"github.com/capy-base/capydb/cli/internal/exitcode"
+	"github.com/capy-base/capydb-cli/internal/config"
+	"github.com/capy-base/capydb-cli/internal/exitcode"
 )
 
 // writeViewer answers /v1/me with a minimal org-bound viewer for org-scoped

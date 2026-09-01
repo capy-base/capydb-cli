@@ -10,10 +10,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/capy-base/capydb/cli/internal/config"
-	"github.com/capy-base/capydb/cli/internal/configlint"
-	"github.com/capy-base/capydb/cli/internal/exitcode"
-	"github.com/capy-base/capydb/cli/internal/scan"
+	"github.com/capy-base/capydb-cli/internal/config"
+	"github.com/capy-base/capydb-cli/internal/configlint"
+	"github.com/capy-base/capydb-cli/internal/exitcode"
+	"github.com/capy-base/capydb-cli/internal/scan"
 )
 
 const (

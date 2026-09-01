@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/capy-base/capydb/cli/internal/exitcode"
+	"github.com/capy-base/capydb-cli/internal/exitcode"
 )
 
 const (

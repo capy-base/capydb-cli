@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/capy-base/capydb/cli/internal/api"
-	"github.com/capy-base/capydb/cli/internal/exitcode"
+	"github.com/capy-base/capydb-cli/internal/api"
+	"github.com/capy-base/capydb-cli/internal/exitcode"
 )
 
 func TestBuildVersionFromSource(t *testing.T) {

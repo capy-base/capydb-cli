@@ -26,7 +26,7 @@ os_raw="$(uname -s)"
 case "$os_raw" in
   Darwin) os="macOS" ;;
   Linux) os="linux" ;;
-  *) err "unsupported OS: $os_raw (use 'go install github.com/capy-base/capydb/cli/cmd/capydb@latest')" ;;
+  *) err "unsupported OS: $os_raw (use 'go install github.com/capy-base/capydb-cli/cmd/capydb@latest')" ;;
 esac
 
 arch_raw="$(uname -m)"

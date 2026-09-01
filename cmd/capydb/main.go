@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/capy-base/capydb/cli/internal/api"
-	"github.com/capy-base/capydb/cli/internal/cli"
-	"github.com/capy-base/capydb/cli/internal/exitcode"
+	"github.com/capy-base/capydb-cli/internal/api"
+	"github.com/capy-base/capydb-cli/internal/cli"
+	"github.com/capy-base/capydb-cli/internal/exitcode"
 )
 
 var (

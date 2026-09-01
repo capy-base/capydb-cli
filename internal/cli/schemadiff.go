@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/capy-base/capydb/cli/internal/api"
+	"github.com/capy-base/capydb-cli/internal/api"
 )
 
 // diffSchemas produces a deterministic, human-readable list of structural

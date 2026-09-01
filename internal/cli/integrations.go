@@ -11,9 +11,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/capy-base/capydb/cli/internal/api"
-	"github.com/capy-base/capydb/cli/internal/config"
-	projectdetect "github.com/capy-base/capydb/cli/internal/project"
+	"github.com/capy-base/capydb-cli/internal/api"
+	"github.com/capy-base/capydb-cli/internal/config"
+	projectdetect "github.com/capy-base/capydb-cli/internal/project"
 )
 
 type integrationEnvPayload struct {

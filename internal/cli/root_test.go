@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/capy-base/capydb/cli/internal/api"
-	"github.com/capy-base/capydb/cli/internal/config"
+	"github.com/capy-base/capydb-cli/internal/api"
+	"github.com/capy-base/capydb-cli/internal/config"
 )
 
 func TestCreateCommandWritesEnvAndProjectConfig(t *testing.T) {

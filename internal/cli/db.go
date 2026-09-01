@@ -11,7 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/capy-base/capydb/cli/internal/api"
+	"github.com/capy-base/capydb-cli/internal/api"
 )
 
 // resolveConnectionURL resolves the direct or pooled connection URL for the
