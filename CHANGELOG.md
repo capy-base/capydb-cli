@@ -8,6 +8,8 @@ Releases are cut with GoReleaser from a git tag; entries under **Unreleased** sh
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-31
+
 ### Added
 
 - `capydb db sql --allow-unqualified-writes`. The control plane now refuses an `UPDATE` or
@@ -46,6 +48,11 @@ Releases are cut with GoReleaser from a git tag; entries under **Unreleased** sh
 
 ### Fixed
 
+- The Go module path is now `github.com/capy-base/capydb-cli`, matching the repository, so
+  `go install github.com/capy-base/capydb-cli/cmd/capydb@latest` resolves. The old path
+  (`github.com/capy-base/capydb/cli`) named a repository that does not exist and never installed.
+- `go.sum` was missing the module hash for `capydbclient` v1.7.0, so a clean checkout could not
+  build the CLI.
 - The dump-upload progress line (`capydb import --file`) is now TTY-aware: piped/CI runs get plain
   progress lines at most every 5 seconds and a final `Upload complete` line, instead of one
   carriage-return-garbled line in the log.
