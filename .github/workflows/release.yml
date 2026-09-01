@@ -21,6 +21,18 @@ jobs:
       REPOSITORY_URL: https://github.com/${{ github.repository }}
 
     steps:
+      # GoReleaser pushes the Homebrew cask to capy-base/homebrew-tap, which the
+      # per-repo GITHUB_TOKEN cannot write to. Fail before the build rather than
+      # after the GitHub release is already published.
+      - name: Check release token
+        env:
+          RELEASE_GITHUB_TOKEN: ${{ secrets.RELEASE_GITHUB_TOKEN }}
+        run: |
+          if [ -z "$RELEASE_GITHUB_TOKEN" ]; then
+            echo "RELEASE_GITHUB_TOKEN is not set: it needs contents:write on this repo and on capy-base/homebrew-tap" >&2
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v7
         with:
@@ -76,7 +88,7 @@ jobs:
           version: "~> v2"
           args: release --clean
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_GITHUB_TOKEN }}
           RELEASE_REPO_OWNER: ${{ env.RELEASE_REPO_OWNER }}
           RELEASE_REPO_NAME: ${{ env.RELEASE_REPO_NAME }}
           IMAGE_REPOSITORY: ${{ env.IMAGE_REPOSITORY }}
@@ -118,6 +130,13 @@ jobs:
           gh release download "$TAG" --repo "$REPO" --pattern 'capydb_*_linux_x86_64.tar.gz' --dir release-test
           tar -xzf release-test/capydb_*_linux_x86_64.tar.gz -C release-test
           ./release-test/capydb --version
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Test Docker image
         env:
