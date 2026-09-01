@@ -8,6 +8,44 @@ Releases are cut with GoReleaser from a git tag; entries under **Unreleased** sh
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-01
+
+### Added
+
+- `capydb migrate scan --source-url`: read-only live-database probes alongside the repo scan,
+  because the repo and the database routinely disagree (measured on a real assessment: 620 policies
+  in migration files vs 483 live; a "vestigial" client library that was the app's only data layer).
+  The probes measure the live RLS corpus and classify how policies resolve the caller (direct
+  `auth.*` vs app-defined helper functions whose bodies read `auth.jwt()`), count `auth.users` and
+  the last sign-in (the zero-user window gate: migrate before onboarding users), split
+  not-on-CapyDB extensions into likely-unused (0 dependent objects - filter from the dump) vs
+  load-bearing, list storage buckets, detect absolute provider URLs persisted in data columns
+  (the storage exit then needs a data backfill, not just an API swap), flag populated
+  migration-bookkeeping tables as a possible import in flight (freeze other data movements during
+  cutover), and compare the `supabase_realtime` publication against the code's actual
+  subscriptions. All probes are best-effort, statement-timeout-capped, and the session is forced
+  read-only.
+- `capydb migrate scan` now recommends an RLS migration path: server code building anon-key
+  clients (authorization delegated to RLS) or a large live corpus (≥50 policies) gets
+  "keep the policies - `capydb migrate rls` + per-transaction context"; a small corpus with
+  service-role/explicit-filter code style keeps the app-layer-guards recommendation.
+- `capydb migrate scan` cross-checks the code's `.rpc()` call sites against local SQL (and, with
+  `--source-url`, the live database): an RPC with no `CREATE FUNCTION` anywhere in the repo lives
+  only in the provider's database and must be recovered before cutover.
+- `capydb migrate rls --source-url`: convert from live-database introspection (capyrls's `live`
+  loader) instead of parsing SQL files - migration folders drift from what is actually deployed.
+- New dependency: `github.com/jackc/pgx/v5` (database/sql driver for the two `--source-url` modes).
+- `capydb migrate squash`: analyze or consolidate a migration history via the open-source
+  capysquash engine (exec wrapper - the engine's SQL parser is cgo and this CLI is cross-compiled
+  CGO-free). Read-only ANALYZE by default; `--workflow safe|fast` consolidates. Points at
+  `go install github.com/capysquash/pgsquash-engine/cmd/pgsquash@latest` when the binary is
+  missing. `migrate scan` now recommends it when a repo carries ≥50 migration files, and the
+  `migration_history_not_baselined` lint fix text mentions it.
+
+- capyrls bumped to v1.1.0: the `migrate rls` report now links converted policies to the helper
+  functions they authorize through (annotated outcomes, per-routine reference counts, and an
+  incomplete-until-ported warning).
+
 ## [1.0.0] - 2026-08-31
 
 ### Added

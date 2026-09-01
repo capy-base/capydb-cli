@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -229,4 +230,208 @@ func TestDetectEnvConflictsStandalone(t *testing.T) {
 
 func contains(haystack, needle string) bool {
 	return len(haystack) >= len(needle) && strings.Contains(haystack, needle)
+}
+
+// TestScanRPCSourceGate reproduces the roomie-radar finding (2026-09-01): the
+// app called three DB-resident functions whose CREATE FUNCTION existed in no
+// repo - a silent cutover breaker unless the scan names them.
+func TestScanRPCSourceGate(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "package.json", `{"dependencies":{"@supabase/supabase-js":"^2.0.0"}}`)
+	writeFile(t, root, "pnpm-lock.yaml", "lockfileVersion: 9\n")
+	writeFile(t, root, "src/api.ts", `
+await supabase.rpc('handle_clerk_user', { id })
+await supabase.rpc('get_or_create_conversation')
+const rows = await supabase.from('profiles').select()
+`)
+	writeFile(t, root, "supabase/migrations/0001.sql",
+		"CREATE OR REPLACE FUNCTION public.get_or_create_conversation() RETURNS uuid AS $$ $$ LANGUAGE sql;")
+
+	report, err := Run(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Repo.RPCNames) != 2 {
+		t.Fatalf("rpc names = %v, want 2", report.Repo.RPCNames)
+	}
+	if len(report.Repo.RPCsWithoutLocalSource) != 1 || report.Repo.RPCsWithoutLocalSource[0] != "handle_clerk_user" {
+		t.Fatalf("rpcs without local source = %v, want [handle_clerk_user]", report.Repo.RPCsWithoutLocalSource)
+	}
+	var rpcWarning string
+	for _, warning := range report.Scenario.Warnings {
+		if contains(warning, "handle_clerk_user") {
+			rpcWarning = warning
+		}
+	}
+	if rpcWarning == "" || !contains(rpcWarning, "no CREATE FUNCTION") {
+		t.Fatalf("expected an RPC-source warning naming handle_clerk_user, got %+v", report.Scenario.Warnings)
+	}
+}
+
+// TestScanAnonKeyClientClassification: server code on the anon key delegates
+// authorization to RLS - the discriminator for the RLS migration path.
+func TestScanAnonKeyClientClassification(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "package.json", `{"dependencies":{"@supabase/supabase-js":"^2.0.0"}}`)
+	writeFile(t, root, "pnpm-lock.yaml", "lockfileVersion: 9\n")
+	writeFile(t, root, "src/lib/server.ts", `
+import 'server-only'
+const client = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!)
+`)
+	writeFile(t, root, "src/lib/admin.ts", `
+const admin = createClient(url, process.env.SUPABASE_SERVICE_ROLE_KEY!)
+`)
+
+	report, err := Run(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Repo.CallSites.AnonKeyClientFiles != 1 {
+		t.Errorf("anon key client files = %d, want 1", report.Repo.CallSites.AnonKeyClientFiles)
+	}
+	if report.Repo.CallSites.ServiceRoleKeyFiles != 1 {
+		t.Errorf("service role key files = %d, want 1", report.Repo.CallSites.ServiceRoleKeyFiles)
+	}
+}
+
+// TestAttachSourceRLSPathAndGates drives the live-source scenario logic with
+// the measured myroomiev3 shape: many policies resolved via a helper function,
+// zero auth users, vestigial extensions, an import in flight, and persisted
+// storage URLs.
+func TestAttachSourceRLSPathAndGates(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".env.local", "NEXT_PUBLIC_SUPABASE_URL=https://abcdefghijklm.supabase.co\n")
+	writeFile(t, root, "package.json", `{"dependencies":{"@clerk/nextjs":"^6.0.0","@supabase/supabase-js":"^2.0.0"}}`)
+	writeFile(t, root, "pnpm-lock.yaml", "lockfileVersion: 9\n")
+	writeFile(t, root, "src/lib/server.ts", `
+import 'server-only'
+const client = createServerClient(url, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!)
+const a = await supabase.from('profiles').select()
+const b = await supabase.from('messages').select()
+const c = await supabase.from('posts').select()
+const d = await supabase.from('likes').select()
+const e = await supabase.from('props').select()
+const f = await supabase.from('bookings').select()
+`)
+
+	report, err := Run(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	report.AttachSource(&SourceFacts{
+		ServerVersion: "17.6", DatabaseSizeBytes: 60 << 20, PublicTables: 169,
+		Policies:  SourcePolicies{Total: 483, DirectAuthRefs: 12, ViaHelpers: 471, HelperNames: []string{"clerk_user_id"}},
+		AuthUsers: &SourceAuthUsers{Count: 0},
+		Extensions: []SourceExtension{
+			{Name: "postgis", Version: "3.6", Dependents: 14, Available: true},
+			{Name: "earthdistance", Version: "1.2", Dependents: 0, Available: false},
+			{Name: "cube", Version: "1.5", Dependents: 3, Available: false},
+		},
+		ImportArtifactTables: []string{"wp_migration_map (840 rows)"},
+		PersistedURLColumns:  []string{"community_posts.image_url"},
+		PublicFunctions:      []string{"handle_clerk_user"},
+	})
+
+	var planText string
+	for _, step := range report.Scenario.Plan {
+		planText += step + "\n"
+	}
+	if !contains(planText, "KEEP the policies") || !contains(planText, "483 live policies") {
+		t.Fatalf("expected a keep-the-policies plan step with the live count, got:\n%s", planText)
+	}
+	if !contains(planText, "clerk_user_id") {
+		t.Errorf("plan step should name the helper function, got:\n%s", planText)
+	}
+
+	warnings := strings.Join(report.Scenario.Warnings, "\n")
+	for _, want := range []string{
+		"zero-user window",
+		"earthdistance",
+		"cube (3 dependent objects)",
+		"wp_migration_map",
+		"community_posts.image_url",
+		"471 of 483",
+	} {
+		if !contains(warnings, want) {
+			t.Errorf("warnings missing %q:\n%s", want, warnings)
+		}
+	}
+	// earthdistance is vestigial (skip-from-dump), cube is blocking - they
+	// must land in different warnings.
+	if !contains(warnings, "LIKELY unused") {
+		t.Errorf("expected the vestigial-extension warning, got:\n%s", warnings)
+	}
+}
+
+// TestAttachSourceSmallCorpusRecommendsAppGuards: a small policy set with
+// service-role-dominant code style keeps the app-guard recommendation.
+func TestAttachSourceSmallCorpusRecommendsAppGuards(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".env", "NEXT_PUBLIC_SUPABASE_URL=https://abcdefghijklm.supabase.co\n")
+	writeFile(t, root, "package.json", `{"dependencies":{"@supabase/supabase-js":"^2.0.0"}}`)
+	writeFile(t, root, "pnpm-lock.yaml", "lockfileVersion: 9\n")
+	writeFile(t, root, "src/lib/admin.ts", `
+const admin = createClient(url, process.env.SUPABASE_SERVICE_ROLE_KEY!)
+const a = await supabase.from('a').select()
+const b = await supabase.from('b').select()
+const c = await supabase.from('c').select()
+const d = await supabase.from('d').select()
+const e = await supabase.from('e').select()
+const f = await supabase.from('f').select()
+`)
+
+	report, err := Run(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	report.AttachSource(&SourceFacts{Policies: SourcePolicies{Total: 20}})
+
+	var planText string
+	for _, step := range report.Scenario.Plan {
+		planText += step + "\n"
+	}
+	if !contains(planText, "app-layer guards") || contains(planText, "KEEP the policies") {
+		t.Fatalf("expected the app-guard path for a small service-role-style corpus, got:\n%s", planText)
+	}
+}
+
+func TestVestigialAndBlockingExtensions(t *testing.T) {
+	facts := &SourceFacts{Extensions: []SourceExtension{
+		{Name: "postgis", Dependents: 5, Available: true},
+		{Name: "earthdistance", Dependents: 0, Available: false},
+		{Name: "timescaledb", Dependents: 7, Available: false},
+	}}
+	if vestigial := facts.VestigialExtensions(); len(vestigial) != 1 || vestigial[0] != "earthdistance" {
+		t.Errorf("vestigial = %v, want [earthdistance]", vestigial)
+	}
+	blocking := facts.BlockingExtensions()
+	if len(blocking) != 1 || !contains(blocking[0], "timescaledb (7 dependent objects)") {
+		t.Errorf("blocking = %v, want timescaledb with count", blocking)
+	}
+}
+
+// TestScanLongHistoryRecommendsSquash: a long migration history gets the
+// consolidate-before-moving warning pointing at `capydb migrate squash`.
+func TestScanLongHistoryRecommendsSquash(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".env", "NEXT_PUBLIC_SUPABASE_URL=https://abcdefghijklm.supabase.co\n")
+	writeFile(t, root, "package.json", `{"dependencies":{"@supabase/supabase-js":"^2.0.0"}}`)
+	writeFile(t, root, "pnpm-lock.yaml", "lockfileVersion: 9\n")
+	for i := range 50 {
+		writeFile(t, root, filepath.Join("supabase", "migrations", fmt.Sprintf("%04d_step.sql", i)), "select 1;")
+	}
+
+	report, err := Run(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, warning := range report.Scenario.Warnings {
+		if strings.Contains(warning, "capydb migrate squash") && strings.Contains(warning, "50 migration files") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected the squash recommendation for 50 migration files, got %+v", report.Scenario.Warnings)
+	}
 }

@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver for --source-url
 	"github.com/spf13/cobra"
 
 	"github.com/capy-base/capydb-cli/internal/scan"
@@ -28,19 +31,29 @@ func (a *app) newMigrateCommand() *cobra.Command {
 	command.AddCommand(a.newMigrateDepsCommand())
 	command.AddCommand(a.newMigrateCodemodCommand())
 	command.AddCommand(a.newMigrateRLSCommand())
+	command.AddCommand(a.newMigrateSquashCommand())
 	return command
 }
 
 func (a *app) newMigrateScanCommand() *cobra.Command {
 	var portfolioDir string
+	var sourceURL string
 
 	command := &cobra.Command{
 		Use:   "scan [path]",
 		Short: "Classify a repository and emit a CapyDB migration plan (read-only)",
-		Long: `Scans a repository (no network, nothing mutated) and classifies it across the
-three migration axes - source database provider, auth system, data-access
-layer - plus provider-coupled services, then emits a per-database migration
-plan with an effort grade.
+		Long: `Scans a repository (nothing mutated) and classifies it across the three
+migration axes - source database provider, auth system, data-access layer -
+plus provider-coupled services, then emits a per-database migration plan with
+an effort grade. The repo scan is fully offline.
+
+Pass --source-url with the OLD database's DIRECT connection string to also
+measure what the repo cannot show: the live RLS corpus and how it resolves the
+caller (which decides the RLS migration path), whether real users exist yet,
+extensions that are installed but unused, provider URLs persisted in data
+rows, and signs of another data import in flight. The probes are plain
+read-only SELECTs with a statement timeout; anything the role cannot see is
+reported as skipped.
 
 Pass --portfolio <dir> to also grep sibling repos' env files for the same
 database hostnames: a database's cutover must swap EVERY consumer in one step.`,
@@ -54,6 +67,18 @@ database hostnames: a database's cutover must swap EVERY consumer in one step.`,
 			if err != nil {
 				return fmt.Errorf("migrate scan: %w", err)
 			}
+			if url := strings.TrimSpace(sourceURL); url != "" {
+				db, err := sql.Open("pgx", url)
+				if err != nil {
+					return fmt.Errorf("migrate scan: open source database: %w", err)
+				}
+				defer func() { _ = db.Close() }()
+				facts, err := scan.ProbeSource(cmd.Context(), db)
+				if err != nil {
+					return fmt.Errorf("migrate scan: %w", err)
+				}
+				report.AttachSource(facts)
+			}
 			if a.jsonOutput() {
 				return printJSON(cmd.OutOrStdout(), map[string]any{"scan": report})
 			}
@@ -63,6 +88,7 @@ database hostnames: a database's cutover must swap EVERY consumer in one step.`,
 	}
 
 	command.Flags().StringVar(&portfolioDir, "portfolio", "", "Directory of sibling repos to check for other consumers of the same databases")
+	command.Flags().StringVar(&sourceURL, "source-url", "", "The OLD provider's DIRECT connection string - adds read-only live-database probes to the plan")
 	return command
 }
 
@@ -99,6 +125,7 @@ func writeMigrateScan(cmd *cobra.Command, report scan.Report) {
 		_, _ = fmt.Fprintf(out, "supabase assets: %d migration file(s), %d edge function(s)\n",
 			report.Repo.SupabaseAssets.MigrationFiles, report.Repo.SupabaseAssets.EdgeFunctions)
 	}
+	writeMigrateScanSource(out, report.Source)
 
 	_, _ = fmt.Fprintln(out, "\nplan:")
 	for index, step := range report.Scenario.Plan {
@@ -109,6 +136,50 @@ func writeMigrateScan(cmd *cobra.Command, report scan.Report) {
 		for _, warning := range report.Scenario.Warnings {
 			_, _ = fmt.Fprintf(out, "  - %s\n", warning)
 		}
+	}
+}
+
+// writeMigrateScanSource renders the live-database probe block. The repo says
+// what the code does; this block says what the database says - when they
+// disagree, the database wins.
+func writeMigrateScanSource(out io.Writer, source *scan.SourceFacts) {
+	if source == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(out, "\nsource database (live, read-only probes):\n")
+	_, _ = fmt.Fprintf(out, "  postgres %s, %s, %d public table(s)\n",
+		source.ServerVersion, formatBytes(source.DatabaseSizeBytes), source.PublicTables)
+	policies := source.Policies
+	if policies.Total > 0 {
+		helperSuffix := ""
+		if policies.ViaHelpers > 0 {
+			helperSuffix = fmt.Sprintf(" via helpers (%s)", strings.Join(policies.HelperNames, ", "))
+		}
+		_, _ = fmt.Fprintf(out, "  rls policies: %d live - %d direct auth.*, %d%s\n",
+			policies.Total, policies.DirectAuthRefs, policies.ViaHelpers, helperSuffix)
+	}
+	if users := source.AuthUsers; users != nil {
+		lastSignIn := users.LastSignIn
+		if lastSignIn == "" {
+			lastSignIn = "never"
+		}
+		_, _ = fmt.Fprintf(out, "  auth users: %d (last sign-in: %s)\n", users.Count, lastSignIn)
+	}
+	for _, extension := range source.Extensions {
+		if extension.Available {
+			continue
+		}
+		usage := "likely unused (0 dependent objects)"
+		if extension.Dependents > 0 {
+			usage = fmt.Sprintf("%d dependent object(s)", extension.Dependents)
+		}
+		_, _ = fmt.Fprintf(out, "  extension not on CapyDB: %s %s - %s\n", extension.Name, extension.Version, usage)
+	}
+	for _, bucket := range source.StorageBuckets {
+		_, _ = fmt.Fprintf(out, "  storage bucket: %s (%d object(s), %s)\n", bucket.Name, bucket.Objects, formatBytes(bucket.Bytes))
+	}
+	for _, note := range source.Notes {
+		_, _ = fmt.Fprintf(out, "  note: %s\n", note)
 	}
 }
 

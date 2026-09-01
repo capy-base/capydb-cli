@@ -1,15 +1,19 @@
 package cli
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	capyrls "github.com/capy-base/capyrls"
+	capyrlslive "github.com/capy-base/capyrls/live"
 )
 
 // `capydb migrate rls` converts Supabase row-level-security policies into
@@ -31,6 +35,7 @@ func (a *app) newMigrateRLSCommand() *cobra.Command {
 		keepForAll      bool
 		noServiceEscape bool
 		outDir          string
+		sourceURL       string
 	)
 
 	command := &cobra.Command{
@@ -48,8 +53,10 @@ match. The default output re-homes them onto transaction-local GUCs
 --mode supabase-compat for a shim that keeps policies verbatim instead.
 
 Point it at a repo root and it finds supabase/migrations on its own. For the
-most faithful input, feed it a live dump:
-  pg_dump --schema-only "$SUPABASE_URL" > schema.sql && capydb migrate rls schema.sql
+most faithful input, introspect the LIVE database instead of parsing files -
+migration folders drift from what is actually deployed (dropped-and-recreated
+policies, SQL-editor hotfixes that never became migrations):
+  capydb migrate rls --source-url "$SUPABASE_DIRECT_URL"
 
 Policies that reference auth.users or Supabase-managed schemas are surfaced
 in the report, not silently dropped.`,
@@ -80,13 +87,31 @@ in the report, not silently dropped.`,
 				return usageErrorf("unknown --role-model %q (single or split)", roleModel)
 			}
 
-			sources, sourceDescription, err := collectRLSSources(root)
-			if err != nil {
-				return err
-			}
-			result, err := capyrls.Convert(sources, options)
-			if err != nil {
-				return fmt.Errorf("migrate rls: %w", err)
+			var result *capyrls.Result
+			var sourceDescription string
+			if url := strings.TrimSpace(sourceURL); url != "" {
+				if len(args) == 1 {
+					return usageErrorf("--source-url and a path argument are mutually exclusive")
+				}
+				catalog, err := introspectRLSSource(cmd.Context(), url)
+				if err != nil {
+					return fmt.Errorf("migrate rls: %w", err)
+				}
+				sourceDescription = "live database"
+				result, err = capyrls.ConvertCatalog(catalog, options)
+				if err != nil {
+					return fmt.Errorf("migrate rls: %w", err)
+				}
+			} else {
+				sources, description, err := collectRLSSources(root)
+				if err != nil {
+					return err
+				}
+				sourceDescription = description
+				result, err = capyrls.Convert(sources, options)
+				if err != nil {
+					return fmt.Errorf("migrate rls: %w", err)
+				}
 			}
 
 			written, err := writeRLSBundle(result, outDir)
@@ -112,7 +137,25 @@ in the report, not silently dropped.`,
 	command.Flags().BoolVar(&keepForAll, "keep-for-all", false, "Keep FOR ALL policies instead of splitting them per command")
 	command.Flags().BoolVar(&noServiceEscape, "no-service-escape", false, "Single role model: skip the GUC-gated service bypass policies")
 	command.Flags().StringVar(&outDir, "out", "capyrls", "Directory to write the SQL bundle and report into")
+	command.Flags().StringVar(&sourceURL, "source-url", "", "Introspect the LIVE database (direct endpoint, read-only) instead of parsing SQL files")
 	return command
+}
+
+// introspectRLSSource loads the RLS catalog from a running database - the
+// server has already normalized every policy expression, and nothing depends
+// on migration files being complete.
+func introspectRLSSource(ctx context.Context, dsn string) (*capyrls.Catalog, error) {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open source database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := db.PingContext(ctx); err != nil {
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+	return capyrlslive.Load(ctx, db)
 }
 
 // collectRLSSources resolves the input path: a single SQL file, a directory

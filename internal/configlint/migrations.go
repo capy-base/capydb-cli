@@ -97,7 +97,7 @@ func EvaluateMigrationState(local LocalMigrationState, applied, userTables int) 
 			File: local.Dir,
 			Message: "the database has " + strconv.Itoa(userTables) + " tables but no recorded migrations, while this repo carries " +
 				strconv.Itoa(local.Count) + " - the schema was applied without recording history (typically `push`), so the next migrate replays from the first migration and fails on objects that already exist",
-			Fix: "baseline before migrating: mark the existing migrations as already applied so migrate starts from the current schema",
+			Fix: "baseline before migrating: mark the existing migrations as already applied so migrate starts from the current schema; a long history is worth consolidating first - `capydb migrate squash` (read-only analysis by default)",
 		}
 	}
 	// Some applied, but fewer than the repo has: normal pending migrations, not

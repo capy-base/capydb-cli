@@ -3,7 +3,9 @@
 // provider x auth system x data-access layer), runs the migration gates
 // (consumers, hygiene, coupling), and emits a per-database migration plan.
 // Design and scenario vocabulary: docs/capydb-migration-scenarios-spec.md in
-// the capydb repo. The scan never talks to a network or mutates anything.
+// the capydb repo. The repo scan never talks to a network or mutates anything;
+// the optional live-source probes (`--source-url`, source.go) connect
+// read-only to the OLD database and nothing else.
 package scan
 
 import (
@@ -27,7 +29,10 @@ type Report struct {
 	Databases    []Database    `json:"databases"`
 	EnvConflicts []EnvConflict `json:"env_conflicts"`
 	Repo         RepoFacts     `json:"repo"`
-	Scenario     Scenario      `json:"scenario"`
+	// Source holds the live-database probe results when the scan ran with
+	// --source-url; nil for a repo-only scan.
+	Source   *SourceFacts `json:"source,omitempty"`
+	Scenario Scenario     `json:"scenario"`
 }
 
 // EnvAssignment is one env file's database value for a single env key.
@@ -84,6 +89,16 @@ type RepoFacts struct {
 	Lockfiles      []string `json:"lockfiles"`
 	PackageDirs    []string `json:"package_dirs"`
 	SupabaseAssets Supabase `json:"supabase_assets"`
+
+	// RPCNames are the distinct database function names the code calls via
+	// .rpc(). Their SOURCE must exist somewhere: an RPC with no CREATE
+	// FUNCTION in the repo lives only in the provider's database and must be
+	// recovered before cutover (roomie-radar lesson, 2026-09-01).
+	RPCNames []string `json:"rpc_names"`
+	// LocalSQLFunctions are function names defined in the repo's SQL files.
+	LocalSQLFunctions []string `json:"-"`
+	// RPCsWithoutLocalSource are RPCNames with no local CREATE FUNCTION.
+	RPCsWithoutLocalSource []string `json:"rpcs_without_local_source"`
 }
 
 // CallSites counts provider-coupled call sites per KIND - dependency presence
@@ -95,6 +110,16 @@ type CallSites struct {
 	SupabaseRealtime int      `json:"supabase_realtime"` // .channel( / postgres_changes
 	NeonDriverFiles  []string `json:"neon_driver_files"` // files importing @neondatabase/serverless or drizzle-orm/neon-*
 	NeonBatchCalls   int      `json:"neon_batch_calls"`  // db.batch( / sql.transaction([ - need transaction rewrites
+
+	// AnonKeyClientFiles counts files constructing supabase clients on the
+	// anon/publishable key. When that happens in SERVER code, authorization is
+	// delegated to RLS - queries deliberately omit ownership filters - so the
+	// RLS corpus is load-bearing far beyond the browser (myroomiev3 lesson:
+	// 224 server files on the anon key).
+	AnonKeyClientFiles int `json:"anon_key_client_files"`
+	// ServiceRoleKeyFiles counts files referencing the service-role secret -
+	// those clients bypass RLS.
+	ServiceRoleKeyFiles int `json:"service_role_key_files"`
 }
 
 // Supabase inventories provider-project assets in the repo.
@@ -138,6 +163,12 @@ var (
 	supabaseRealtimePattern = regexp.MustCompile(`\.channel\s*\(|postgres_changes`)
 	neonImportPattern       = regexp.MustCompile(`@neondatabase/serverless|drizzle-orm/neon-`)
 	neonBatchPattern        = regexp.MustCompile(`\bdb\s*\.\s*batch\s*\(|\bsql\s*\.\s*transaction\s*\(\s*\[`)
+
+	rpcCallPattern        = regexp.MustCompile(`\.rpc\(\s*['"]([A-Za-z0-9_]+)['"]`)
+	sqlFunctionPattern    = regexp.MustCompile(`(?i)create\s+(?:or\s+replace\s+)?function\s+(?:"?[a-z0-9_]+"?\.)?"?([a-z0-9_]+)"?`)
+	supabaseClientPattern = regexp.MustCompile(`createClient\s*[<(]|createServerClient\s*\(|createBrowserClient\s*\(`)
+	anonKeyPattern        = regexp.MustCompile(`SUPABASE_(?:ANON_KEY|PUBLISHABLE)`)
+	serviceRolePattern    = regexp.MustCompile(`SUPABASE_(?:SERVICE_ROLE_KEY|SECRET_KEY)`)
 
 	// Loaders that pin ONE env file, bypassing the framework's precedence:
 	// dotenv `config({ path: "..." })`, python-dotenv `load_dotenv("...")`,
@@ -228,6 +259,9 @@ func Run(root, portfolioDir string) (Report, error) {
 
 		if sourceExtensions[filepath.Ext(name)] {
 			scanSourceFile(path, relative, &report.Repo)
+		}
+		if strings.HasSuffix(name, ".sql") {
+			scanSQLFile(path, &report.Repo)
 		}
 		if strings.Contains(relative, "supabase"+string(filepath.Separator)+"migrations") && strings.HasSuffix(name, ".sql") {
 			report.Repo.SupabaseAssets.MigrationFiles++
@@ -572,6 +606,32 @@ func scanSourceFile(path, relative string, facts *RepoFacts) {
 	if neonImportPattern.MatchString(content) {
 		sites.NeonDriverFiles = append(sites.NeonDriverFiles, relative)
 	}
+
+	for _, match := range rpcCallPattern.FindAllStringSubmatch(content, -1) {
+		facts.RPCNames = append(facts.RPCNames, match[1])
+	}
+	if supabaseClientPattern.MatchString(content) && anonKeyPattern.MatchString(content) {
+		sites.AnonKeyClientFiles++
+	}
+	if serviceRolePattern.MatchString(content) {
+		sites.ServiceRoleKeyFiles++
+	}
+}
+
+// scanSQLFile collects function names defined in the repo's SQL, so .rpc()
+// call sites can be cross-checked against a local CREATE FUNCTION.
+func scanSQLFile(path string, facts *RepoFacts) {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() > maxSourceFileBytes {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, match := range sqlFunctionPattern.FindAllStringSubmatch(string(data), -1) {
+		facts.LocalSQLFunctions = append(facts.LocalSQLFunctions, strings.ToLower(match[1]))
+	}
 }
 
 // consumerSearchToken picks the string to grep sibling repos for. Supabase
@@ -661,6 +721,28 @@ func normalizeRepoFacts(facts *RepoFacts) {
 	if facts.DistTagPins == nil {
 		facts.DistTagPins = []string{}
 	}
+
+	sort.Strings(facts.RPCNames)
+	facts.RPCNames = dedupe(facts.RPCNames)
+	sort.Strings(facts.LocalSQLFunctions)
+	facts.LocalSQLFunctions = dedupe(facts.LocalSQLFunctions)
+	facts.RPCsWithoutLocalSource = []string{}
+	for _, name := range facts.RPCNames {
+		if !has(facts.LocalSQLFunctions, strings.ToLower(name)) {
+			facts.RPCsWithoutLocalSource = append(facts.RPCsWithoutLocalSource, name)
+		}
+	}
+	if facts.RPCNames == nil {
+		facts.RPCNames = []string{}
+	}
+}
+
+// AttachSource merges the live-source probe results into the report and
+// re-derives the scenario: several plan decisions (the RLS path above all)
+// change once the database itself has been measured.
+func (r *Report) AttachSource(facts *SourceFacts) {
+	r.Source = facts
+	r.Scenario = deriveScenario(*r)
 }
 
 func dedupe(values []string) []string {
@@ -725,7 +807,7 @@ func deriveScenario(report Report) Scenario {
 		}
 		scenario.Plan = []string{
 			fmt.Sprintf("Rewrite ~%d supabase.from() call sites to drizzle/postgres-js AGAINST THE CURRENT SUPABASE DB first (it is plain Postgres) - this decouples the code rewrite from the infra cutover.", sites.SupabaseData),
-			"Map every RLS policy to an app-layer guard in the new data modules before dropping policies (run `capydb import preflight` for the authoritative policy list).",
+			rlsPathStep(report),
 			serviceReplacementStep(sites),
 			"Then: create project, preflight, import (dump public + app schemas via the DIRECT endpoint), swap DATABASE_URL, redeploy every consumer at once.",
 		}
@@ -782,6 +864,9 @@ func deriveScenario(report Report) Scenario {
 		scenario.Warnings = append(scenario.Warnings, warning)
 	}
 
+	appendCallSiteWarnings(&scenario, report)
+	appendSourceWarnings(&scenario, report)
+
 	if len(report.Repo.Lockfiles) == 0 && len(report.Repo.PackageDirs) > 0 {
 		scenario.Warnings = append(scenario.Warnings, "no lockfile found - dependency state is not reproducible; resolve before migrating")
 	}
@@ -796,6 +881,121 @@ func deriveScenario(report Report) Scenario {
 		)
 	}
 	return scenario
+}
+
+// rlsPathStep decides the RLS migration path. The primary discriminator is
+// code STYLE, not policy count: server code on the anon key delegates
+// authorization to RLS (queries deliberately omit ownership filters), so
+// dropping the policies silently returns other users' rows. The live policy
+// count is the secondary signal. Calibration: myroomiev3 (483 live policies,
+// anon-key server clients) made app-guard rewriting infeasible; realtyiq
+// (~30 policies, explicit-filter code) made it trivial.
+func rlsPathStep(report Report) string {
+	sites := report.Repo.CallSites
+	source := report.Source
+	if source == nil || source.Policies.Total == 0 {
+		return "Map every RLS policy to an app-layer guard in the new data modules before dropping policies (run `capydb import preflight` for the authoritative policy list, or re-run this scan with --source-url to measure the live corpus and get a path recommendation)."
+	}
+	policies := source.Policies
+	anonServerClients := sites.AnonKeyClientFiles > 0 && sites.AnonKeyClientFiles >= sites.ServiceRoleKeyFiles
+	if anonServerClients || policies.Total >= 50 {
+		detail := fmt.Sprintf("%d live policies", policies.Total)
+		if policies.ViaHelpers > 0 {
+			detail += fmt.Sprintf(", %d of them via helper function(s) %s", policies.ViaHelpers, strings.Join(firstN(policies.HelperNames, 3), ", "))
+		}
+		reason := "a corpus this size cannot be rewritten as app guards safely"
+		if anonServerClients {
+			reason = fmt.Sprintf("%d file(s) build anon-key clients, so the code relies on RLS for row scoping", sites.AnonKeyClientFiles)
+		}
+		return fmt.Sprintf("KEEP the policies (%s; %s): run `capydb migrate rls --source-url <direct-url>` and set the per-transaction context in the new data layer (@capydb/drizzle withAuthContext) - dropping RLS here silently returns other users' rows.", detail, reason)
+	}
+	return fmt.Sprintf("Map the %d live RLS policies to app-layer guards in the new data modules before dropping them (small corpus, explicit-filter code style - app guards are simpler than the GUC plumbing).", policies.Total)
+}
+
+// appendCallSiteWarnings covers the gates that need only the repo: RPCs whose
+// source exists nowhere locally, and grep-count honesty at scale.
+func appendCallSiteWarnings(scenario *Scenario, report Report) {
+	if missing := report.Repo.RPCsWithoutLocalSource; len(missing) > 0 {
+		warning := ".rpc() calls reference database function(s) with no CREATE FUNCTION in this repo: " + strings.Join(firstN(missing, 6), ", ")
+		if source := report.Source; source != nil {
+			var absentLive []string
+			for _, name := range missing {
+				if !has(source.PublicFunctions, strings.ToLower(name)) {
+					absentLive = append(absentLive, name)
+				}
+			}
+			if len(absentLive) > 0 {
+				warning += " - " + strings.Join(firstN(absentLive, 4), ", ") + " do(es) not exist in the live database either: dead call sites or a different schema"
+			} else {
+				warning += " - they exist only in the live database: recover their source (pg_dump --schema-only) before cutover"
+			}
+		} else {
+			warning += " - they live only in the provider's database: recover their source before cutover"
+		}
+		scenario.Warnings = append(scenario.Warnings, warning)
+	}
+	if report.Repo.CallSites.SupabaseData > 100 {
+		scenario.Warnings = append(scenario.Warnings, fmt.Sprintf(
+			"call-site counts are raw text matches - at this size (%d data call sites) verify liveness (e.g. with knip) before scheduling the rewrite; dead exports skew estimates in both directions",
+			report.Repo.CallSites.SupabaseData))
+	}
+	if files := report.Repo.SupabaseAssets.MigrationFiles; files >= 50 {
+		scenario.Warnings = append(scenario.Warnings, fmt.Sprintf(
+			"%d migration files - a history this long has usually drifted from the deployed schema (compare with the live policy/table counts): consolidate it into a clean baseline before the move with `capydb migrate squash` (wraps the open-source capysquash engine)",
+			files))
+	}
+}
+
+// appendSourceWarnings turns the live-source probe results into gates. Each
+// one exists because its absence mis-sized or endangered a real migration
+// (myroomiev3 assessment, 2026-09-01).
+func appendSourceWarnings(scenario *Scenario, report Report) {
+	source := report.Source
+	if source == nil {
+		return
+	}
+	if users := source.AuthUsers; users != nil {
+		if users.Count == 0 {
+			scenario.Warnings = append(scenario.Warnings,
+				"auth.users is EMPTY - zero-user window: migrate BEFORE onboarding users and the cutover stays a no-PII move with a free rollback")
+		} else {
+			lastSignIn := users.LastSignIn
+			if lastSignIn == "" {
+				lastSignIn = "never"
+			}
+			scenario.Warnings = append(scenario.Warnings, fmt.Sprintf(
+				"auth.users holds %d account(s) (last sign-in: %s) - live production: plan a write freeze and keep the source paused as rollback", users.Count, lastSignIn))
+		}
+	}
+	if vestigial := source.VestigialExtensions(); len(vestigial) > 0 {
+		scenario.Warnings = append(scenario.Warnings,
+			"extensions installed but LIKELY unused (0 dependent objects) and not offered on CapyDB: "+strings.Join(vestigial, ", ")+
+				" - filter their CREATE EXTENSION lines from the dump instead of blocking on them")
+	}
+	if blocking := source.BlockingExtensions(); len(blocking) > 0 {
+		scenario.Warnings = append(scenario.Warnings,
+			"extensions NOT offered on CapyDB with live dependents: "+strings.Join(blocking, ", ")+" - resolve before import")
+	}
+	if len(source.ImportArtifactTables) > 0 {
+		scenario.Warnings = append(scenario.Warnings,
+			"possible data import IN FLIGHT (populated migration bookkeeping tables: "+strings.Join(firstN(source.ImportArtifactTables, 3), ", ")+
+				") - freeze every other data movement during the cutover so the two migrations cannot interleave")
+	}
+	if len(source.PersistedURLColumns) > 0 {
+		scenario.Warnings = append(scenario.Warnings,
+			"absolute provider storage URLs are persisted in data columns: "+strings.Join(firstN(source.PersistedURLColumns, 5), ", ")+
+				" - the storage exit needs a data backfill (rewrite stored URLs), not just an API swap")
+	}
+	if len(source.RealtimeTables) > 0 {
+		scenario.Warnings = append(scenario.Warnings, fmt.Sprintf(
+			"supabase_realtime publication covers %d table(s) (%s) but the code has %d realtime call site(s) - replace only what is actually subscribed",
+			len(source.RealtimeTables), strings.Join(firstN(source.RealtimeTables, 5), ", "), report.Repo.CallSites.SupabaseRealtime))
+	}
+	if source.Policies.ViaHelpers > 0 {
+		scenario.Warnings = append(scenario.Warnings, fmt.Sprintf(
+			"%d of %d live policies resolve through helper function(s) (%s) whose bodies read auth.* - policy-text greps undercount them; `capydb migrate rls` converts the policies and its report lists the helper bodies to port",
+			source.Policies.ViaHelpers, source.Policies.Total, strings.Join(firstN(source.Policies.HelperNames, 3), ", ")))
+	}
 }
 
 func authLabel(clerk, dumpSafe bool) string {
