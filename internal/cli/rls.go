@@ -12,13 +12,13 @@ import (
 
 	"github.com/spf13/cobra"
 
-	capyrls "github.com/capy-base/capyrls"
-	capyrlslive "github.com/capy-base/capyrls/live"
+	capyrls "github.com/capydatabase/capyrls"
+	capyrlslive "github.com/capydatabase/capyrls/live"
 )
 
 // `capydb migrate rls` converts Supabase row-level-security policies into
 // portable, vanilla Postgres. It wraps the capyrls engine
-// (github.com/capy-base/capyrls), which also ships standalone for people who
+// (github.com/capydatabase/capyrls), which also ships standalone for people who
 // are not moving to CapyDB. The converter's rule matches the codemod's:
 // anything needing human judgment is reported, never guessed at - policies it
 // cannot port mechanically are emitted commented out and listed.

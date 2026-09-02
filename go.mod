@@ -1,10 +1,10 @@
-module github.com/capy-base/capydb-cli
+module github.com/capydatabase/capydb-cli
 
-go 1.27.0
+go 1.27.1
 
 require (
-	github.com/capy-base/capydbclient v1.8.0
-	github.com/capy-base/capyrls v1.1.0
+	github.com/capydatabase/capydbclient v1.9.0
+	github.com/capydatabase/capyrls v1.1.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/spf13/cobra v1.10.2
 )

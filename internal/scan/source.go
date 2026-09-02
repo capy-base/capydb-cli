@@ -66,6 +66,24 @@ type SourceFacts struct {
 	DatabaseSizeBytes int64  `json:"database_size_bytes"`
 	PublicTables      int    `json:"public_tables"`
 
+	// Provider is the source provider as the SERVER identifies itself, one of
+	// the Provider* identifiers. This beats the hostname classification
+	// wherever the two disagree: Cloud SQL and AlloyDB publish no hostname at
+	// all, Heroku Postgres answers on an ordinary EC2 name, and anything behind
+	// a bastion arrives as an address.
+	Provider string `json:"provider"`
+	// ProviderSignals are the catalog facts that produced Provider, kept so a
+	// surprising classification can be argued with.
+	ProviderSignals []string `json:"provider_signals"`
+
+	// Replication is the source's readiness for a streaming (`--follow`)
+	// import. Measured, not assumed from the provider.
+	Replication SourceReplication `json:"replication"`
+
+	// Inventory is the physical shape of the database - what has to be copied
+	// and which parts of it complicate the copy.
+	Inventory SourceInventory `json:"inventory"`
+
 	Policies SourcePolicies `json:"policies"`
 
 	// AuthUsers is nil when the source has no readable auth.users table
@@ -159,6 +177,7 @@ func ProbeSource(ctx context.Context, db *sql.DB) (*SourceFacts, error) {
 		RealtimeTables: []string{}, StorageBuckets: []SourceBucket{},
 		PersistedURLColumns: []string{}, ImportArtifactTables: []string{},
 		Extensions: []SourceExtension{}, PublicFunctions: []string{}, Notes: []string{},
+		ProviderSignals: []string{}, Provider: ProviderOther,
 	}
 	note := func(probe string, err error) {
 		facts.Notes = append(facts.Notes, fmt.Sprintf("%s probe skipped: %s", probe, compactError(err)))
@@ -189,6 +208,14 @@ func ProbeSource(ctx context.Context, db *sql.DB) (*SourceFacts, error) {
 	if err := probePublicFunctions(ctx, conn, facts); err != nil {
 		note("public functions", err)
 	}
+	if err := probeProvider(ctx, conn, facts); err != nil {
+		note("provider identification", err)
+	}
+	if err := probeReplication(ctx, conn, facts); err != nil {
+		note("replication readiness", err)
+	}
+	probeInventory(ctx, conn, facts, note)
+	facts.refreshReplicationReadiness()
 	return facts, nil
 }
 

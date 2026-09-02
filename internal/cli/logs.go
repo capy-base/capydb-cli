@@ -10,7 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/capy-base/capydb-cli/internal/api"
+	"github.com/capydatabase/capydb-cli/internal/api"
 )
 
 // logsFollowInterval paces the --follow poll loop. Each poll is one control-

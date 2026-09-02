@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/capy-base/capydb-cli/internal/config"
-	"github.com/capy-base/capydb-cli/internal/exitcode"
+	"github.com/capydatabase/capydb-cli/internal/config"
+	"github.com/capydatabase/capydb-cli/internal/exitcode"
 )
 
 // writeViewer answers /v1/me with a minimal org-bound viewer for org-scoped
@@ -593,7 +593,7 @@ func TestConfigShowMasksAPIKey(t *testing.T) {
 
 func TestVersionCheckReportsLatestRelease(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/capy-base/capydb-cli/releases/latest" {
+		if r.URL.Path != "/repos/capydatabase/capydb-cli/releases/latest" {
 			t.Fatalf("unexpected request path: %s", r.URL.Path)
 		}
 		writeJSON(t, w, map[string]any{"tag_name": "v9.9.9"})

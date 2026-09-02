@@ -16,7 +16,7 @@ import (
 // defaultReleaseRepo is the public GitHub repo release archives are published
 // to (see .goreleaser.yaml / scripts/install.sh). CAPYDB_REPO overrides it,
 // matching the install script's convention.
-const defaultReleaseRepo = "capy-base/capydb-cli"
+const defaultReleaseRepo = "capydatabase/capydb-cli"
 
 // releasesAPIBaseURL is a package variable so tests can point the update check
 // at a local server.

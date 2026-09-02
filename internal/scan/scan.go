@@ -65,9 +65,11 @@ type EnvLoader struct {
 
 // Database is one distinct database hostname the repo references.
 type Database struct {
-	Hostname  string   `json:"hostname"`
-	Provider  string   `json:"provider"` // neon | supabase | azure | rds | capydb | local | other
-	Pooled    bool     `json:"pooled"`   // provider pooler endpoint (must not be used for dumps)
+	Hostname string `json:"hostname"`
+	// Provider is one of the Provider* identifiers in provider.go, classified
+	// from the hostname. A live scan overrides it with what the server says.
+	Provider  string   `json:"provider"`
+	Pooled    bool     `json:"pooled"` // provider pooler endpoint (must not be used for dumps)
 	EnvKeys   []string `json:"env_keys"`
 	EnvFiles  []string `json:"env_files"`
 	Consumers []string `json:"consumers,omitempty"` // other portfolio repos referencing this hostname
@@ -457,25 +459,6 @@ func scanEnvFile(path, relative string, databases map[string]*Database, supabase
 		if match := supabaseRefPattern.FindStringSubmatch(trimmed); match != nil {
 			supabaseRefs[match[1]] = true
 		}
-	}
-}
-
-func classifyHost(host string) string {
-	switch {
-	case strings.HasSuffix(host, ".neon.tech"):
-		return "neon"
-	case strings.HasSuffix(host, ".supabase.com") || strings.HasSuffix(host, ".supabase.co"):
-		return "supabase"
-	case strings.HasSuffix(host, ".postgres.database.azure.com"):
-		return "azure"
-	case strings.Contains(host, ".rds.amazonaws.com"):
-		return "rds"
-	case strings.HasSuffix(host, ".db.capydb.dev") || host == "db1.capydb.dev":
-		return "capydb"
-	case host == "localhost" || host == "127.0.0.1" || !strings.Contains(host, "."):
-		return "local"
-	default:
-		return "other"
 	}
 }
 
@@ -941,7 +924,7 @@ func appendCallSiteWarnings(scenario *Scenario, report Report) {
 	}
 	if files := report.Repo.SupabaseAssets.MigrationFiles; files >= 50 {
 		scenario.Warnings = append(scenario.Warnings, fmt.Sprintf(
-			"%d migration files - a history this long has usually drifted from the deployed schema (compare with the live policy/table counts): consolidate it into a clean baseline before the move with `capydb migrate squash` (wraps the open-source capysquash engine)",
+			"%d migration files - a history this long has usually drifted from the deployed schema (compare with the live policy/table counts): consolidate it into a clean baseline before the move with `capydb migrate squash` (wraps the open-source pgsquash engine)",
 			files))
 	}
 }

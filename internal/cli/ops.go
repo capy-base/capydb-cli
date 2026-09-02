@@ -17,8 +17,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/capy-base/capydb-cli/internal/api"
-	"github.com/capy-base/capydb-cli/internal/config"
+	"github.com/capydatabase/capydb-cli/internal/api"
+	"github.com/capydatabase/capydb-cli/internal/config"
 )
 
 func (a *app) newPreviewCommand() *cobra.Command {
@@ -1229,15 +1229,14 @@ func (a *app) newRestoreCommand() *cobra.Command {
 			}
 
 			request := api.CreateRestoreRequest{
-				AllowUnverifiedBackup:   allowUnverified,
-				BackupKey:               trimmedBackupKey,
-				ConfirmProjectOverwrite: confirmProjectOverwrite,
-				PreviewName:             strings.TrimSpace(previewName),
-				Recreate:                recreate,
-				RestorePointID:          trimmedRestorePoint,
-				RestoreTime:             trimmedRestoreTime,
-				TargetKind:              resolvedKind,
-				TTLHours:                ttlHours,
+				AllowUnverifiedBackup: allowUnverified,
+				BackupKey:             trimmedBackupKey,
+				PreviewName:           strings.TrimSpace(previewName),
+				Recreate:              recreate,
+				RestorePointID:        trimmedRestorePoint,
+				RestoreTime:           trimmedRestoreTime,
+				TargetKind:            resolvedKind,
+				TTLHours:              ttlHours,
 			}
 			if resolvedKind == "preview" {
 				preview, err := a.resolvePreview(ctx, client, project.ID, previewRef)
@@ -1259,7 +1258,14 @@ func (a *app) newRestoreCommand() *cobra.Command {
 				if !confirmed {
 					return fmt.Errorf("project overwrite not confirmed; pass --confirm or confirm interactively")
 				}
-				request.ConfirmProjectOverwrite = true
+				// The confirmation above is the human gate; the control plane's
+				// gate is a single-use approval token minted here and consumed
+				// by the restore itself.
+				approval, err := client.MintProjectApproval(ctx, project.ID, "project.restore_overwrite")
+				if err != nil {
+					return fmt.Errorf("mint restore approval: %w", err)
+				}
+				request.ApprovalToken = approval.Token
 			}
 
 			job, err := client.CreateRestore(ctx, project.ID, request)

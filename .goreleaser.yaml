@@ -96,16 +96,16 @@ changelog:
       - Merge branch
       - go mod tidy
 
-# Publishes a cask to github.com/capy-base/homebrew-tap so users can
-# `brew tap capy-base/tap && brew install --cask capydb` (or plain
-# `brew install capy-base/tap/capydb`). Casks are GoReleaser's current
+# Publishes a cask to github.com/capydatabase/homebrew-tap so users can
+# `brew tap capydatabase/tap && brew install --cask capydb` (or plain
+# `brew install capydatabase/tap/capydb`). Casks are GoReleaser's current
 # mechanism for prebuilt binaries (the old `brews` formula section is
 # deprecated). The tap repo must exist and the release token needs push
 # access to it. Skipped on snapshot builds.
 homebrew_casks:
   - name: capydb
     repository:
-      owner: capy-base
+      owner: capydatabase
       name: homebrew-tap
       branch: main
     directory: Casks
@@ -142,7 +142,7 @@ release:
     Install with:
 
     ```bash
-    go install github.com/capy-base/capydb-cli/cmd/capydb@{{ .Tag }}
+    go install github.com/capydatabase/capydb-cli/cmd/capydb@{{ .Tag }}
     ```
   footer: |
     Download the archive for your platform from the assets below.

@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/capy-base/capydb-cli/internal/scan"
+	"github.com/capydatabase/capydb-cli/internal/scan"
 )
 
 // Severity separates "this will bite you" from "this is worth knowing".

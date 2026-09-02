@@ -1,7 +1,7 @@
 #!/bin/sh
 # CapyDB CLI installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/capy-base/capydb-cli/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/capydatabase/capydb-cli/main/scripts/install.sh | sh
 #
 # Downloads the latest GitHub release archive for this OS/arch, verifies its
 # SHA-256 against checksums.txt, and installs the `capydb` binary.
@@ -10,10 +10,10 @@
 #   CAPYDB_INSTALL_DIR   target directory (default /usr/local/bin, falls back
 #                        to ~/.local/bin when not writable and sudo is absent)
 #   CAPYDB_VERSION       install a specific tag (e.g. v1.2.3) instead of latest
-#   CAPYDB_REPO          owner/name of the release repo (default capy-base/capydb-cli)
+#   CAPYDB_REPO          owner/name of the release repo (default capydatabase/capydb-cli)
 set -eu
 
-REPO="${CAPYDB_REPO:-capy-base/capydb-cli}"
+REPO="${CAPYDB_REPO:-capydatabase/capydb-cli}"
 PROJECT="capydb"
 
 err() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
@@ -26,7 +26,7 @@ os_raw="$(uname -s)"
 case "$os_raw" in
   Darwin) os="macOS" ;;
   Linux) os="linux" ;;
-  *) err "unsupported OS: $os_raw (use 'go install github.com/capy-base/capydb-cli/cmd/capydb@latest')" ;;
+  *) err "unsupported OS: $os_raw (use 'go install github.com/capydatabase/capydb-cli/cmd/capydb@latest')" ;;
 esac
 
 arch_raw="$(uname -m)"

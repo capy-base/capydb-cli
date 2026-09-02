@@ -7,26 +7,26 @@ The CapyDB CLI is a Go binary for linking local projects to existing CapyDB proj
 Homebrew (macOS/Linux):
 
 ```bash
-brew install capy-base/tap/capydb
+brew install capydatabase/tap/capydb
 ```
 
 Curl installer (macOS/Linux; verifies the release checksum, installs to
 `/usr/local/bin` or `$CAPYDB_INSTALL_DIR`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/capy-base/capydb-cli/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/capydatabase/capydb-cli/main/scripts/install.sh | sh
 ```
 
 With `go install`:
 
 ```bash
-go install github.com/capy-base/capydb-cli/cmd/capydb@latest
+go install github.com/capydatabase/capydb-cli/cmd/capydb@latest
 ```
 
 From source:
 
 ```bash
-git clone https://github.com/capy-base/capydb-cli
+git clone https://github.com/capydatabase/capydb-cli
 cd capydb-cli
 make build
 ```

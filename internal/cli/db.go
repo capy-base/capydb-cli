@@ -11,7 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/capy-base/capydb-cli/internal/api"
+	"github.com/capydatabase/capydb-cli/internal/api"
 )
 
 // resolveConnectionURL resolves the direct or pooled connection URL for the
@@ -168,6 +168,7 @@ func (a *app) newSQLCommand() *cobra.Command {
 	var asJSON bool
 	var maxRows int
 	var projectRef string
+	var readOnly bool
 
 	command := &cobra.Command{
 		Use:   "sql <query>",
@@ -189,7 +190,10 @@ func (a *app) newSQLCommand() *cobra.Command {
 				return err
 			}
 
-			result, err := client.RunSQL(ctx, project.ID, query, maxRows, allowUnqualifiedWrites)
+			if readOnly && allowUnqualifiedWrites {
+				return usageErrorf("--read-only and --allow-unqualified-writes contradict each other")
+			}
+			result, err := client.RunSQL(ctx, project.ID, query, maxRows, allowUnqualifiedWrites, readOnly)
 			if err != nil {
 				return fmt.Errorf("run sql: %w", err)
 			}
@@ -213,6 +217,8 @@ func (a *app) newSQLCommand() *cobra.Command {
 	command.Flags().BoolVar(&allowUnqualifiedWrites, "allow-unqualified-writes", false,
 		"Permit an UPDATE or DELETE with no WHERE clause, or a TRUNCATE (refused by default)")
 	command.Flags().BoolVar(&asJSON, "json", false, "Print the raw JSON result (alias for --output json)")
+	command.Flags().BoolVar(&readOnly, "read-only", false,
+		"Run inside a READ ONLY transaction so the server refuses every write (DML, DDL, TRUNCATE)")
 	return command
 }
 
@@ -349,11 +355,28 @@ func writeObservabilityReport(out io.Writer, observability api.ProjectObservabil
 	default:
 		_, _ = fmt.Fprintln(out, "Top slow queries:")
 		writer := tabwriter.NewWriter(out, 0, 8, 2, ' ', 0)
-		_, _ = fmt.Fprintln(writer, "CALLS\tMEAN_MS\tQUERY")
+		_, _ = fmt.Fprintln(writer, "CALLS\tMEAN_MS\tSPILL\tQUERY")
+		spilled := false
 		for _, slow := range observability.SlowQueries {
-			_, _ = fmt.Fprintf(writer, "%d\t%.1f\t%s\n", slow.Calls, slow.MeanTimeMs, truncateQuery(slow.Query, 80))
+			// A dash rather than "0": the column is absent, not zero, on a
+			// database whose platform objects predate the spill counters.
+			spill := "-"
+			if slow.TempBlksWritten != nil {
+				// pg_stat_statements counts 8KB blocks.
+				spill = formatBytes(*slow.TempBlksWritten * 8192)
+				if *slow.TempBlksWritten > 0 {
+					spilled = true
+				}
+			}
+			_, _ = fmt.Fprintf(writer, "%d\t%.1f\t%s\t%s\n",
+				slow.Calls, slow.MeanTimeMs, spill, truncateQuery(slow.Query, 80))
 		}
 		_ = writer.Flush()
+		if spilled {
+			_, _ = fmt.Fprintln(out, "\nSPILL is what the statement wrote to temporary files because a sort or")
+			_, _ = fmt.Fprintln(out, "hash did not fit in memory. Raise work_mem for that statement only:")
+			_, _ = fmt.Fprintln(out, "  BEGIN; SET LOCAL work_mem = '64MB'; <your query>; COMMIT;")
+		}
 	}
 
 	_, _ = fmt.Fprintln(out, "")

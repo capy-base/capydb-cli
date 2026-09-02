@@ -8,6 +8,50 @@ Releases are cut with GoReleaser from a git tag; entries under **Unreleased** sh
 
 ## [Unreleased]
 
+### Added
+
+- `capydb advisor index-hygiene` (alias `unused-indexes`): lists indexes the database pays for on
+  every write and never reads — no recorded scans, or covered by a wider index on the same table —
+  each with a ready-to-run `DROP INDEX CONCURRENTLY`. Needs no extensions, unlike
+  `capydb advisor indexes`. Constraints are never listed, and nothing is reported until a week of
+  query statistics exists, so an index a monthly job uses is not mistaken for a dead one.
+
+- `capydb sql --read-only`: runs the statement inside a `READ ONLY` transaction so the server
+  itself refuses every write (DML, DDL, `TRUNCATE`, `SELECT INTO`, sequence advancement) -
+  executor-proven, unlike client-side statement inspection. Contradicts and refuses
+  `--allow-unqualified-writes`. `capydb doctor`'s migration-state probe now runs read-only.
+
+### Changed
+
+- `capydb metrics` shows a `SPILL` column on the slow-query table when any statement wrote to
+  temporary files, plus the `SET LOCAL work_mem` recipe for fixing it on that one statement rather
+  than globally. The column is hidden entirely when nothing spilled, and shows `-` rather than `0`
+  on databases whose platform objects predate the counter.
+
+- `capydbclient` bumped to v1.9.0 (approval tokens and read-only SQL).
+- `capydb restore --target-kind project` now completes the control plane's approve-then-execute
+  flow: after the interactive type-the-name confirmation (or `--confirm`), the CLI mints a
+  single-use `project.restore_overwrite` approval token and attaches it to the restore, replacing
+  the old `confirm_project_overwrite: true` request field. The command surface is unchanged.
+
+- `capydb migrate squash --validation capydb` now generates a staged baseline,
+  provisions one empty isolated preview cell, captures the catalog produced by
+  the original migrations, resets the cell, compares the candidate catalog, and
+  publishes the output only after equivalence is proven. The preview is deleted
+  on success or failure, works within the Vibe plan's one-preview limit, and
+  passes its database URL to `pgsquash` through an environment variable rather
+  than command-line arguments.
+- `--project`, `--output`, `--wait-timeout`, and `--preview-ttl-hours` controls
+  for managed squash validation. Local Docker validation remains the default.
+- Migration discovery now includes nested SQL files and the conventional
+  `prisma/migrations` and `drizzle` directories in addition to Supabase and
+  top-level migrations directories.
+
+### Changed
+
+- The missing-engine guidance now points to standalone `pgsquash` GitHub release
+  archives, with `go install` retained as the source-build fallback.
+
 ## [1.1.0] - 2026-09-01
 
 ### Added
@@ -36,7 +80,7 @@ Releases are cut with GoReleaser from a git tag; entries under **Unreleased** sh
   loader) instead of parsing SQL files - migration folders drift from what is actually deployed.
 - New dependency: `github.com/jackc/pgx/v5` (database/sql driver for the two `--source-url` modes).
 - `capydb migrate squash`: analyze or consolidate a migration history via the open-source
-  capysquash engine (exec wrapper - the engine's SQL parser is cgo and this CLI is cross-compiled
+  pgsquash engine (exec wrapper - the engine's SQL parser is cgo and this CLI is cross-compiled
   CGO-free). Read-only ANALYZE by default; `--workflow safe|fast` consolidates. Points at
   `go install github.com/capysquash/pgsquash-engine/cmd/pgsquash@latest` when the binary is
   missing. `migrate scan` now recommends it when a repo carries ≥50 migration files, and the
@@ -82,13 +126,13 @@ Releases are cut with GoReleaser from a git tag; entries under **Unreleased** sh
   the single Go mirror of the OpenAPI component schemas. The CLI keeps only three local shapes
   (`Client`, `PreviewDetails`, `ProjectLogsQuery`); everything else comes from one definition shared
   with the Terraform provider. Tracks `capydbclient` v1.6.0.
-- Go directive raised to 1.27.0.
+- Go directive raised to 1.27.1.
 
 ### Fixed
 
-- The Go module path is now `github.com/capy-base/capydb-cli`, matching the repository, so
-  `go install github.com/capy-base/capydb-cli/cmd/capydb@latest` resolves. The old path
-  (`github.com/capy-base/capydb/cli`) named a repository that does not exist and never installed.
+- The Go module path is now `github.com/capydatabase/capydb-cli`, matching the repository, so
+  `go install github.com/capydatabase/capydb-cli/cmd/capydb@latest` resolves. The old path
+  (`github.com/capydatabase/capydb/cli`) named a repository that does not exist and never installed.
 - `go.sum` was missing the module hash for `capydbclient` v1.7.0, so a clean checkout could not
   build the CLI.
 - The dump-upload progress line (`capydb import --file`) is now TTY-aware: piped/CI runs get plain

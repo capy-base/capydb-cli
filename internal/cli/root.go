@@ -18,13 +18,13 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/capy-base/capydb-cli/internal/api"
-	"github.com/capy-base/capydb-cli/internal/config"
-	"github.com/capy-base/capydb-cli/internal/envfile"
-	"github.com/capy-base/capydb-cli/internal/exitcode"
-	"github.com/capy-base/capydb-cli/internal/gitignore"
-	"github.com/capy-base/capydb-cli/internal/project"
-	"github.com/capy-base/capydb-cli/internal/scan"
+	"github.com/capydatabase/capydb-cli/internal/api"
+	"github.com/capydatabase/capydb-cli/internal/config"
+	"github.com/capydatabase/capydb-cli/internal/envfile"
+	"github.com/capydatabase/capydb-cli/internal/exitcode"
+	"github.com/capydatabase/capydb-cli/internal/gitignore"
+	"github.com/capydatabase/capydb-cli/internal/project"
+	"github.com/capydatabase/capydb-cli/internal/scan"
 )
 
 type app struct {

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/capy-base/capydbclient"
+	"github.com/capydatabase/capydbclient"
 )
 
 // APIError is a non-2xx control-plane response. It is the shared transport
@@ -54,6 +54,7 @@ type (
 	ImportPreflightSource              = capydbclient.SourceInspection
 	ImportUpload                       = capydbclient.ImportUpload
 	IndexAdvisorReport                 = capydbclient.IndexAdvisorReport
+	IndexHygieneReport                 = capydbclient.IndexHygieneReport
 	IndexSuggestion                    = capydbclient.IndexSuggestion
 	Preview                            = capydbclient.PreviewDatabase
 	ProjectAlert                       = capydbclient.ProjectAlert
@@ -71,7 +72,9 @@ type (
 	RestorePoint                       = capydbclient.RestorePoint
 	SQLResult                          = capydbclient.SQLQueryResult
 	ScheduledBackup                    = capydbclient.ScheduledBackup
+	RedundantIndex                     = capydbclient.RedundantIndex
 	SlowQuery                          = capydbclient.SlowQuerySample
+	UnusedIndex                        = capydbclient.UnusedIndex
 	UpsertScheduledBackupRequest       = capydbclient.UpsertScheduledBackupRequest
 )
 
@@ -436,6 +439,20 @@ func (c *Client) CreatePreviewDatabase(ctx context.Context, projectID string, re
 	return response.Preview, response.Job, nil
 }
 
+// MintProjectApproval mints a single-use approval token for one destructive
+// project action ("project.delete" or "project.restore_overwrite"). The raw
+// token is returned exactly once; it expires ~10 minutes after mint.
+func (c *Client) MintProjectApproval(ctx context.Context, projectID, action string) (capydbclient.ProjectApproval, error) {
+	var response struct {
+		Approval capydbclient.ProjectApproval `json:"approval"`
+	}
+	payload := map[string]string{"action": action}
+	if err := c.do(ctx, http.MethodPost, "/v1/projects/"+projectID+"/approvals", payload, &response); err != nil {
+		return capydbclient.ProjectApproval{}, err
+	}
+	return response.Approval, nil
+}
+
 func (c *Client) CreateRestore(ctx context.Context, projectID string, request CreateRestoreRequest) (Job, error) {
 	var response struct {
 		Job Job `json:"job"`
@@ -597,7 +614,12 @@ func (c *Client) GetProjectObservability(ctx context.Context, projectID string) 
 // guard, which otherwise refuses an UPDATE or DELETE with no top-level WHERE
 // and any TRUNCATE. It is sent only when true so an older control plane (which
 // does not know the field) keeps behaving as it does today.
-func (c *Client) RunSQL(ctx context.Context, projectID, query string, maxRows int, allowUnqualifiedWrites bool) (SQLResult, error) {
+//
+// readOnly asks the server to run the statement inside a READ ONLY
+// transaction, so Postgres itself refuses any write (SQLSTATE 25006) - an
+// executor-proven guarantee rather than a client-side check. Also sent only
+// when true, for the same older-control-plane reason.
+func (c *Client) RunSQL(ctx context.Context, projectID, query string, maxRows int, allowUnqualifiedWrites, readOnly bool) (SQLResult, error) {
 	payload := map[string]any{
 		"query": query,
 	}
@@ -606,6 +628,9 @@ func (c *Client) RunSQL(ctx context.Context, projectID, query string, maxRows in
 	}
 	if allowUnqualifiedWrites {
 		payload["allow_unqualified_writes"] = true
+	}
+	if readOnly {
+		payload["read_only"] = true
 	}
 
 	var response struct {
@@ -1036,6 +1061,21 @@ func (c *Client) GetProjectIndexAdvisor(ctx context.Context, projectID string, m
 		return IndexAdvisorReport{}, err
 	}
 	return response.Advisor, nil
+}
+
+// GetProjectIndexHygiene returns the indexes the database is paying for
+// without using: never scanned, or covered by a wider index. Read-only, and it
+// needs no extension - unlike the suggestion side.
+func (c *Client) GetProjectIndexHygiene(ctx context.Context, projectID string) (IndexHygieneReport, error) {
+	var response struct {
+		Hygiene IndexHygieneReport `json:"hygiene"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/projects/"+projectID+"/advisor/index-hygiene", nil, &response); err != nil {
+		return IndexHygieneReport{}, err
+	}
+	response.Hygiene.UnusedIndexes = capydbclient.NormalizeList(response.Hygiene.UnusedIndexes)
+	response.Hygiene.RedundantIndexes = capydbclient.NormalizeList(response.Hygiene.RedundantIndexes)
+	return response.Hygiene, nil
 }
 
 // EnableProjectExtension queues enabling a Postgres extension and returns the

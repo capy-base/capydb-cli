@@ -10,10 +10,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/capy-base/capydb-cli/internal/config"
-	"github.com/capy-base/capydb-cli/internal/configlint"
-	"github.com/capy-base/capydb-cli/internal/exitcode"
-	"github.com/capy-base/capydb-cli/internal/scan"
+	"github.com/capydatabase/capydb-cli/internal/config"
+	"github.com/capydatabase/capydb-cli/internal/configlint"
+	"github.com/capydatabase/capydb-cli/internal/exitcode"
+	"github.com/capydatabase/capydb-cli/internal/scan"
 )
 
 const (
@@ -194,9 +194,10 @@ func (a *app) runDoctor(cmd *cobra.Command, args []string) error {
 			break
 		}
 		query := configlint.MigrationStateQuery(local.Tool)
-		// Read-only introspection, so it is never a candidate for the
-		// unqualified-write opt-out.
-		result, sqlErr := client.RunSQL(ctx, linkConfig.ProjectID, query, 1, false)
+		// Read-only introspection, so it runs under the server-enforced READ
+		// ONLY transaction and is never a candidate for the unqualified-write
+		// opt-out.
+		result, sqlErr := client.RunSQL(ctx, linkConfig.ProjectID, query, 1, false, true)
 		switch {
 		case sqlErr != nil:
 			// A paused cell, a permissions quirk, or a missing migrations table

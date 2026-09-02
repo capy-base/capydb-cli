@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/capy-base/capydb-cli/internal/config"
+	"github.com/capydatabase/capydb-cli/internal/config"
 )
 
 func (a *app) newConfigCommand() *cobra.Command {

@@ -215,6 +215,17 @@ func newImportGateServer(t *testing.T, mutatingPath string, gotBody *map[string]
 					"state":           "ready",
 				}},
 			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/project_1/approvals":
+			// Overwrite restores mint a single-use approval before the
+			// destructive call; hand back a token for the request to carry.
+			writeJSON(t, w, map[string]any{
+				"approval": map[string]any{
+					"id":         "apr_1",
+					"action":     "project.restore_overwrite",
+					"expires_at": "2026-07-14T00:10:00Z",
+					"token":      "ap_test_token",
+				},
+			})
 		case r.Method == http.MethodPost && r.URL.Path == mutatingPath:
 			*mutated = true
 			if gotBody != nil {
@@ -447,8 +458,8 @@ func TestRestoreConfirmFlagAliasesOverwrite(t *testing.T) {
 	if !mutated {
 		t.Fatalf("restore endpoint was never called")
 	}
-	if gotBody["confirm_project_overwrite"] != true {
-		t.Fatalf("expected confirm_project_overwrite: true in body, got %#v", gotBody)
+	if gotBody["approval_token"] != "ap_test_token" {
+		t.Fatalf("expected the minted approval_token in body, got %#v", gotBody)
 	}
 }
 

@@ -9,8 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/capy-base/capydb-cli/internal/api"
-	"github.com/capy-base/capydb-cli/internal/exitcode"
+	"github.com/capydatabase/capydb-cli/internal/api"
+	"github.com/capydatabase/capydb-cli/internal/exitcode"
 )
 
 // newSchemaCommand groups schema introspection utilities: dump writes the

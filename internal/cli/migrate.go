@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -14,7 +16,8 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver for --source-url
 	"github.com/spf13/cobra"
 
-	"github.com/capy-base/capydb-cli/internal/scan"
+	"github.com/capydatabase/capydb-cli/internal/api"
+	"github.com/capydatabase/capydb-cli/internal/scan"
 )
 
 // newMigrateCommand groups the provider-migration tooling: `scan` (read-only
@@ -38,6 +41,8 @@ func (a *app) newMigrateCommand() *cobra.Command {
 func (a *app) newMigrateScanCommand() *cobra.Command {
 	var portfolioDir string
 	var sourceURL string
+	var outPath string
+	var projectRef string
 
 	command := &cobra.Command{
 		Use:   "scan [path]",
@@ -48,15 +53,23 @@ plus provider-coupled services, then emits a per-database migration plan with
 an effort grade. The repo scan is fully offline.
 
 Pass --source-url with the OLD database's DIRECT connection string to also
-measure what the repo cannot show: the live RLS corpus and how it resolves the
-caller (which decides the RLS migration path), whether real users exist yet,
-extensions that are installed but unused, provider URLs persisted in data
-rows, and signs of another data import in flight. The probes are plain
+measure what the repo cannot show: which provider actually runs the database
+(the server is asked, not the hostname), whether it can stream changes for a
+--follow import, the physical inventory (table sizes, tables that cannot be
+replicated, foreign-key cycles, sequences near exhaustion, indexes nothing
+reads), the live RLS corpus and how it resolves the caller, whether real users
+exist yet, extensions that are installed but unused, provider URLs persisted in
+data rows, and signs of another data import in flight. The probes are plain
 read-only SELECTs with a statement timeout; anything the role cannot see is
 reported as skipped.
 
 Pass --portfolio <dir> to also grep sibling repos' env files for the same
-database hostnames: a database's cutover must swap EVERY consumer in one step.`,
+database hostnames: a database's cutover must swap EVERY consumer in one step.
+
+Pass --project to add the control plane's own import preflight, which simulates
+the actual restore against your target rather than grading the source against a
+table of rules. Pass --out to write the whole assessment as JSON, for CI or for
+the assessment page at capydb.dev/switch/check.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			root := a.cwd
@@ -67,7 +80,8 @@ database hostnames: a database's cutover must swap EVERY consumer in one step.`,
 			if err != nil {
 				return fmt.Errorf("migrate scan: %w", err)
 			}
-			if url := strings.TrimSpace(sourceURL); url != "" {
+			url := strings.TrimSpace(sourceURL)
+			if url != "" {
 				db, err := sql.Open("pgx", url)
 				if err != nil {
 					return fmt.Errorf("migrate scan: open source database: %w", err)
@@ -79,17 +93,80 @@ database hostnames: a database's cutover must swap EVERY consumer in one step.`,
 				}
 				report.AttachSource(facts)
 			}
+
+			assessment := scan.Assess(report, a.version)
+
+			// The control plane's preflight is the authoritative half: it
+			// simulates the restore against the real target instead of grading
+			// the source against a table of rules. It needs both an
+			// authenticated project and a live source, so it is opt-in.
+			if strings.TrimSpace(projectRef) != "" {
+				if url == "" {
+					return usageErrorf("--project requires --source-url")
+				}
+				preflight, err := a.scanPreflight(cmd.Context(), projectRef, url)
+				if err != nil {
+					return err
+				}
+				assessment.Preflight = preflight
+			}
+
+			if outPath != "" {
+				if err := writeAssessmentFile(outPath, assessment); err != nil {
+					return err
+				}
+				if !a.jsonOutput() {
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+						"Wrote assessment to %s - drop it on https://capydb.dev/switch/check for the full report.\n", outPath)
+				}
+			}
 			if a.jsonOutput() {
-				return printJSON(cmd.OutOrStdout(), map[string]any{"scan": report})
+				return printJSON(cmd.OutOrStdout(), map[string]any{"assessment": assessment})
 			}
 			writeMigrateScan(cmd, report)
+			writeAssessment(cmd.OutOrStdout(), assessment)
 			return nil
 		},
 	}
 
 	command.Flags().StringVar(&portfolioDir, "portfolio", "", "Directory of sibling repos to check for other consumers of the same databases")
 	command.Flags().StringVar(&sourceURL, "source-url", "", "The OLD provider's DIRECT connection string - adds read-only live-database probes to the plan")
+	command.Flags().StringVar(&projectRef, "project", "", "Target project id, slug, or name - adds the control plane's import preflight to the assessment (requires --source-url)")
+	command.Flags().StringVar(&outPath, "out", "", "Write the full assessment as JSON to this path")
 	return command
+}
+
+// scanPreflight runs the control plane's import preflight for the assessment.
+// A failing preflight is NOT an error here: the whole point of the scan is to
+// report problems, and returning non-zero would hide the rest of the report.
+// `capydb import preflight` remains the gate that exits non-zero.
+func (a *app) scanPreflight(ctx context.Context, projectRef, sourceURL string) (*api.ImportPreflight, error) {
+	client, _, err := a.resolveClient(true, a.linkedProjectAPIURL())
+	if err != nil {
+		return nil, err
+	}
+	project, err := a.resolveProject(ctx, client, projectRef)
+	if err != nil {
+		return nil, err
+	}
+	preflight, err := client.ImportPreflight(ctx, project.ID, sourceURL)
+	if err != nil {
+		return nil, fmt.Errorf("migrate scan: import preflight: %w", err)
+	}
+	return &preflight, nil
+}
+
+// writeAssessmentFile writes the assessment artifact. 0o600: the report carries
+// hostnames, schema names and sampled column names from a production database.
+func writeAssessmentFile(path string, assessment scan.Assessment) error {
+	encoded, err := json.MarshalIndent(assessment, "", "  ")
+	if err != nil {
+		return fmt.Errorf("migrate scan: encode assessment: %w", err)
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+		return fmt.Errorf("migrate scan: write assessment: %w", err)
+	}
+	return nil
 }
 
 func writeMigrateScan(cmd *cobra.Command, report scan.Report) {
@@ -149,6 +226,12 @@ func writeMigrateScanSource(out io.Writer, source *scan.SourceFacts) {
 	_, _ = fmt.Fprintf(out, "\nsource database (live, read-only probes):\n")
 	_, _ = fmt.Fprintf(out, "  postgres %s, %s, %d public table(s)\n",
 		source.ServerVersion, formatBytes(source.DatabaseSizeBytes), source.PublicTables)
+	if len(source.ProviderSignals) > 0 {
+		_, _ = fmt.Fprintf(out, "  provider (per the server): %s - %s\n",
+			source.Profile().Name, strings.Join(source.ProviderSignals, ", "))
+	}
+	writeMigrateScanReplication(out, source.Replication)
+	writeMigrateScanInventory(out, source.Inventory)
 	policies := source.Policies
 	if policies.Total > 0 {
 		helperSuffix := ""
@@ -180,6 +263,108 @@ func writeMigrateScanSource(out io.Writer, source *scan.SourceFacts) {
 	}
 	for _, note := range source.Notes {
 		_, _ = fmt.Fprintf(out, "  note: %s\n", note)
+	}
+}
+
+// writeAssessment renders the graded verdict under the raw scan. The scan block
+// above it is evidence; this block is the answer. Keeping both means a reader
+// who disagrees with a finding can see exactly which fact produced it.
+func writeAssessment(out io.Writer, assessment scan.Assessment) {
+	_, _ = fmt.Fprintf(out, "\nassessment: %s\n", assessment.Headline)
+	_, _ = fmt.Fprintf(out, "source provider: %s\n", assessment.Provider.Name)
+
+	metrics := assessment.Metrics
+	if metrics.TableCount > 0 || metrics.DatabaseBytes > 0 {
+		_, _ = fmt.Fprintf(out, "size: %s across %d table(s), %s of indexes\n",
+			formatBytes(metrics.DatabaseBytes), metrics.TableCount, formatBytes(metrics.IndexBytes))
+		if metrics.ReclaimableBytes > 0 {
+			_, _ = fmt.Fprintf(out, "  %s of that is indexes nothing reads or duplicates - dropping them first shrinks the copy\n",
+				formatBytes(metrics.ReclaimableBytes))
+		}
+	}
+
+	path := assessment.Path
+	_, _ = fmt.Fprintf(out, "\nrecommended path: %s\n", path.Name)
+	_, _ = fmt.Fprintf(out, "  %s\n", path.Summary)
+	_, _ = fmt.Fprintf(out, "  cutover: %s\n", path.Downtime)
+	if path.Unavailable != "" {
+		_, _ = fmt.Fprintf(out, "  why not a streaming import: %s\n", path.Unavailable)
+	}
+	for _, command := range path.Commands {
+		_, _ = fmt.Fprintf(out, "    $ %s\n", command)
+	}
+
+	writeFindings(out, "blockers", assessment.Blockers)
+	writeFindings(out, "warnings", assessment.Warnings)
+	writeFindings(out, "notes", assessment.Notes)
+
+	if assessment.Preflight != nil {
+		_, _ = fmt.Fprintln(out, "\ncontrol-plane preflight (simulated against your target):")
+		writeImportPreflight(out, *assessment.Preflight)
+	}
+}
+
+func writeFindings(out io.Writer, label string, findings []scan.Finding) {
+	if len(findings) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(out, "\n%s (%d):\n", label, len(findings))
+	for _, finding := range findings {
+		_, _ = fmt.Fprintf(out, "  - %s\n    %s\n", finding.Title, finding.Detail)
+		if finding.Remediation != "" {
+			_, _ = fmt.Fprintf(out, "    fix: %s\n", finding.Remediation)
+		}
+		for _, item := range finding.Items {
+			_, _ = fmt.Fprintf(out, "      * %s\n", item)
+		}
+	}
+}
+
+// writeMigrateScanReplication reports whether a streaming import is possible
+// from this source AS CONNECTED - the provider's documented default is not
+// evidence about the database in front of us.
+func writeMigrateScanReplication(out io.Writer, replication scan.SourceReplication) {
+	if replication.WALLevel == "" {
+		return
+	}
+	verdict := "cannot stream changes yet"
+	if replication.Ready {
+		verdict = "ready to stream changes (`capydb import --follow`)"
+	}
+	_, _ = fmt.Fprintf(out, "  replication: %s - wal_level=%s, %d/%d slots free, %d wal sender(s)\n",
+		verdict, replication.WALLevel,
+		replication.MaxReplicationSlots-replication.UsedSlots, replication.MaxReplicationSlots,
+		replication.MaxWALSenders)
+	for _, blocker := range replication.Blockers {
+		_, _ = fmt.Fprintf(out, "    - %s\n", blocker)
+	}
+}
+
+func writeMigrateScanInventory(out io.Writer, inventory scan.SourceInventory) {
+	if inventory.TableCount == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(out, "  inventory: %d table(s), %s total, %s of indexes",
+		inventory.TableCount, formatBytes(inventory.TotalTableBytes), formatBytes(inventory.IndexBytes))
+	if inventory.PartitionedTables > 0 {
+		_, _ = fmt.Fprintf(out, ", %d partitioned", inventory.PartitionedTables)
+	}
+	_, _ = fmt.Fprintln(out)
+	if inventory.LargeTables > 0 {
+		_, _ = fmt.Fprintf(out, "    %d table(s) over 100GiB (%d over 500GiB)\n",
+			inventory.LargeTables, inventory.VeryLargeTables)
+	}
+	if count := len(inventory.TablesWithoutPrimaryKey); count > 0 {
+		_, _ = fmt.Fprintf(out, "    %d table(s) without a primary key\n", count)
+	}
+	if count := len(inventory.ForeignKeyCycles); count > 0 {
+		_, _ = fmt.Fprintf(out, "    %d foreign-key cycle(s)\n", count)
+	}
+	if bytes := inventory.ReclaimableBytes(); bytes > 0 {
+		_, _ = fmt.Fprintf(out, "    %s of unused/duplicate indexes\n", formatBytes(bytes))
+	}
+	if count := len(inventory.SequencesNearExhaustion); count > 0 {
+		_, _ = fmt.Fprintf(out, "    %d sequence(s) near the end of their range\n", count)
 	}
 }
 

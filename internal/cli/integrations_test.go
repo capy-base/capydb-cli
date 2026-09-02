@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/capy-base/capydb-cli/internal/api"
+	"github.com/capydatabase/capydb-cli/internal/api"
 )
 
 func TestBuildVercelEnvPayloadUsesBranchScopedPreviewTarget(t *testing.T) {

@@ -21,7 +21,7 @@ jobs:
       REPOSITORY_URL: https://github.com/${{ github.repository }}
 
     steps:
-      # GoReleaser pushes the Homebrew cask to capy-base/homebrew-tap, which the
+      # GoReleaser pushes the Homebrew cask to capydatabase/homebrew-tap, which the
       # per-repo GITHUB_TOKEN cannot write to. Fail before the build rather than
       # after the GitHub release is already published.
       - name: Check release token
@@ -29,7 +29,7 @@ jobs:
           RELEASE_GITHUB_TOKEN: ${{ secrets.RELEASE_GITHUB_TOKEN }}
         run: |
           if [ -z "$RELEASE_GITHUB_TOKEN" ]; then
-            echo "RELEASE_GITHUB_TOKEN is not set: it needs contents:write on this repo and on capy-base/homebrew-tap" >&2
+            echo "RELEASE_GITHUB_TOKEN is not set: it needs contents:write on this repo and on capydatabase/homebrew-tap" >&2
             exit 1
           fi
 
